@@ -291,6 +291,17 @@ function read_message!(fr::FrameReader)::Union{Nothing,IOBuffer}
     return IOBuffer(payload)
 end
 
+# Consume any remaining request frames through end-of-stream. For unary and
+# server-streaming RPCs the client sends exactly one message and half-closes;
+# draining to EOF marks the request body fully consumed so HTTP.jl does not
+# force the underlying connection closed (which would cancel other multiplexed
+# streams under load).
+function drain_to_eof!(fr::FrameReader)
+    while read_message!(fr) !== nothing
+    end
+    return nothing
+end
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------

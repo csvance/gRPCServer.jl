@@ -69,6 +69,7 @@ function _invoke_server_stream(
         gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "server-stream request missing message"),
     )
     req = decode(ProtoDecoder(io), TReq)
+    drain_to_eof!(fr)
 
     out = Channel{TResp}(16)
     _start_response!(stream, ctx)
