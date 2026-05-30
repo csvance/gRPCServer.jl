@@ -129,32 +129,37 @@ julia --project=benchmark -e 'using Pkg; Pkg.instantiate()'   # first time
 julia --project=benchmark --threads=auto benchmark/run.jl
 ```
 
-### Known limitation: HTTP/2 receive window caps large uploads
+### HTTP/2 flow-control window and large uploads
 
 Large client to server messages (big request protobufs and client-streaming) are
-bounded by the HTTP/2 flow-control window, not by anything in this package.
-HTTP.jl 2.0 advertises the protocol-default 64 KiB stream and connection windows
-(it sends an empty SETTINGS frame) and replenishes them as the handler reads the
-body. The practical effect is that in-flight upload bytes are capped near 64 KiB,
-so upload throughput is limited to roughly window / round-trip-time. On localhost
-this is invisible, but over a network with a 10 ms round trip it caps uploads
-near 6 MB/s regardless of message size. Downloads (server to client) are not
-affected the same way, since HTTP.jl already batches outgoing DATA frames.
+bounded by the HTTP/2 flow-control window. At the protocol-default 64 KiB stream
+and connection windows, in-flight upload bytes are capped near 64 KiB, so upload
+throughput is limited to roughly window / round-trip-time. On localhost this is
+invisible, but over a network with a 10 ms round trip it caps uploads near 6 MB/s
+regardless of message size. Downloads (server to client) are not affected the same
+way, since HTTP.jl already batches outgoing DATA frames.
 
-Raising the window is the largest available gain for uploads, but it is entirely
-inside HTTP.jl and there is no hook this package can use. It requires three
-coordinated, upstream changes:
+`serve!` exposes three keywords that raise the windows, forwarded to `HTTP.listen!`
+(they require the vendored HTTP.jl fork that implements them; see `Project.toml`).
+All default to the protocol defaults, so behavior is unchanged unless set:
 
-1. Advertise a larger `SETTINGS_INITIAL_WINDOW_SIZE` in the server's SETTINGS
-   frame (raises the per-stream window only)
-2. Send an initial `WINDOW_UPDATE` on stream 0 to raise the connection-level
-   window, which SETTINGS does not affect
-3. Raise the per-stream `max_buffered_bytes` (currently 256 KiB) to at least the
-   new window, so a fast client with a slow handler does not trip the buffer
-   limit
+- `h2_initial_window_size` (default 65535): the per-stream receive window the
+  server advertises via `SETTINGS_INITIAL_WINDOW_SIZE`
+- `h2_connection_window_size` (default 65535): the connection-level receive window,
+  applied with an initial `WINDOW_UPDATE` when above 65535
+- `h2_max_buffered_bytes` (default 262144): the per-stream receive buffer cap. It
+  must be at least `h2_initial_window_size`
 
-The clean form exposes these as keyword arguments on `HTTP.Server` /
-`HTTP.listen!` that `serve!` then forwards.
+```julia
+# Size the window to the bandwidth-delay product, e.g. 8 MiB for a high-BDP link.
+serve!(router, "0.0.0.0", 50051;
+    h2_initial_window_size = 8 * 1024 * 1024,
+    h2_connection_window_size = 8 * 1024 * 1024,
+    h2_max_buffered_bytes = 8 * 1024 * 1024)
+```
+
+To benefit in both directions, the client must advertise a matching receive window,
+since an endpoint's send throughput is governed by the peer's advertised window.
 
 Transport tuning that is sometimes expected but does not apply here: there is no
 TCP send/receive buffer size knob in HTTP.jl 2.0 or its Reseau transport (the

@@ -84,6 +84,53 @@
     end
 end
 
+# Raised HTTP/2 flow-control windows are forwarded to HTTP.listen! and the server
+# still round-trips correctly, including a multi-frame upload larger than the
+# default 64 KiB window. Exercises the serve! -> HTTP.jl-fork keyword wiring.
+@static if VERSION >= v"1.12"
+    @testset "HTTP/2 window config" begin
+        W = 4 * 1024 * 1024
+        server = start_test_server(
+            "127.0.0.1",
+            0;
+            h2_initial_window_size = W,
+            h2_connection_window_size = W,
+            h2_max_buffered_bytes = W,
+        )
+        port = HTTP.port(server)
+        sleep(0.3)
+        try
+            client = TestService_TestRPC_Client("127.0.0.1", port)
+            resp = gRPCClient.grpc_sync_request(client, TestRequest(7, UInt64[]))
+            @test length(resp.data) == 7
+
+            # Upload more than the default 64 KiB window in one stream.
+            cs = TestService_TestClientStreamRPC_Client("127.0.0.1", port)
+            request_c = Channel{TestRequest}(20)
+            req = gRPCClient.grpc_async_request(cs, request_c)
+            for _ = 1:20
+                put!(request_c, TestRequest(1, zeros(UInt64, 16 * 1024)))
+            end
+            close(request_c)
+            cresp = gRPCClient.grpc_async_await(cs, req)
+            @test length(cresp.data) == 20
+        finally
+            close(server)
+        end
+    end
+
+    # Invalid window config is rejected (max_buffered_bytes below the window).
+    @testset "HTTP/2 window config validation" begin
+        @test_throws ArgumentError gRPCServer.serve!(
+            gRPCServer.gRPCRouter(),
+            "127.0.0.1",
+            0;
+            h2_initial_window_size = 1024 * 1024,
+            h2_max_buffered_bytes = 4096,
+        )
+    end
+end
+
 # The context payload (Oxygen-style ctx.payload::T) threads through to handlers.
 struct CtxProbe
     bump::UInt64
