@@ -16,8 +16,19 @@ Keyword arguments:
   When `tls=false` (default) the server speaks cleartext HTTP/2 (h2c).
 - `sticky`: spawn the streaming pump tasks sticky (`@async`) instead of
   migratable (`Threads.@spawn`). Default `false`. See the package docs.
-- `read_timeout`, `write_timeout`, `idle_timeout`, `reuseaddr`, `backlog`,
-  `max_header_bytes`: forwarded to `HTTP.listen!`.
+- `max_concurrent_requests`: cap the number of RPCs handled at once. When the
+  cap is reached, further requests are shed immediately with
+  `RESOURCE_EXHAUSTED` rather than queued, so a flood cannot exhaust memory or
+  task slots. `0` (default) disables the cap.
+- `read_header_timeout`, `idle_timeout`, `read_timeout`, `write_timeout`
+  (seconds): connection deadlines forwarded to `HTTP.listen!`. `read_header_timeout`
+  (default 30s) and `idle_timeout` (default 300s) bound slow-header and idle
+  connections without affecting established streams. `read_timeout` and
+  `write_timeout` default to `nothing` (disabled): enabling them defends against
+  a peer that trickles or never finishes a request/response body, but a non-zero
+  `read_timeout` will also terminate a legitimately idle long-lived streaming
+  RPC, so enable it only for unary or short-lived workloads.
+- `reuseaddr`, `backlog`, `max_header_bytes`: forwarded to `HTTP.listen!`.
 """
 function serve!(
     router::gRPCRouter,
@@ -29,14 +40,18 @@ function serve!(
     key_file::Union{Nothing,AbstractString} = nothing,
     alpn_protocols::Vector{String} = ["h2"],
     sticky::Bool = false,
+    max_concurrent_requests::Integer = 0,
+    read_header_timeout = 30,
+    idle_timeout = 300,
     read_timeout = nothing,
     write_timeout = nothing,
-    idle_timeout = nothing,
     max_header_bytes::Integer = 1024 * 1024,
     reuseaddr::Bool = true,
     backlog::Integer = 128,
 )
-    handler = stream -> dispatch(router, stream, context, sticky)
+    inflight = Threads.Atomic{Int}(0)
+    limit = Int(max_concurrent_requests)
+    handler = stream -> dispatch(router, stream, context, sticky, limit, inflight)
 
     if tls
         (cert_file === nothing || key_file === nothing) &&
@@ -56,6 +71,7 @@ function serve!(
         return HTTP.listen!(
             handler,
             listener;
+            read_header_timeout = read_header_timeout,
             read_timeout = read_timeout,
             write_timeout = write_timeout,
             idle_timeout = idle_timeout,
@@ -66,6 +82,7 @@ function serve!(
             handler,
             host,
             Int(port);
+            read_header_timeout = read_header_timeout,
             read_timeout = read_timeout,
             write_timeout = write_timeout,
             idle_timeout = idle_timeout,
@@ -165,18 +182,27 @@ function _finish_error(stream::HTTP.Stream, ctx::gRPCContext, err)
 end
 
 """
-    dispatch(router, stream, payload, sticky)
+    dispatch(router, stream, payload, sticky, max_concurrent, inflight)
 
-Handle one inbound HTTP/2 stream: validate, route, build the context, invoke the
-handler, and emit the closing gRPC trailers.
+Handle one inbound HTTP/2 stream: validate, route, apply the concurrency cap,
+build the context, invoke the handler, and emit the closing gRPC trailers.
+`max_concurrent` (0 = unlimited) and the shared `inflight` counter implement
+load shedding.
 """
-function dispatch(router::gRPCRouter, stream::HTTP.Stream, payload, sticky::Bool)
+function dispatch(
+    router::gRPCRouter,
+    stream::HTTP.Stream,
+    payload,
+    sticky::Bool,
+    max_concurrent::Int,
+    inflight::Threads.Atomic{Int},
+)
     request = HTTP.startread(stream)
 
     ct = HTTP.header(request.headers, "Content-Type", "")
     if !_is_grpc_content_type(ct)
         try
-            _trailers_only(stream, GRPC_INTERNAL, "invalid content-type: $ct")
+            _trailers_only(stream, GRPC_INTERNAL, "invalid content-type: $(_clip(ct))")
         catch
         end
         return nothing
@@ -185,21 +211,55 @@ function dispatch(router::gRPCRouter, stream::HTTP.Stream, payload, sticky::Bool
     entry = get(router.routes, request.target, nothing)
     if entry === nothing
         try
-            _trailers_only(stream, GRPC_UNIMPLEMENTED, "Method not found: $(request.target)")
+            _trailers_only(stream, GRPC_UNIMPLEMENTED, "Method not found: $(_clip(request.target))")
         catch
         end
         return nothing
     end
 
-    ctx = _build_context(stream, request, payload)
-    ctx.sticky = sticky
+    # Admission control: shed load past the concurrency cap rather than letting
+    # an unbounded number of in-flight handlers accumulate. `atomic_add!` returns
+    # the prior count, so a prior value at or above the limit means we are full.
+    admitted = false
+    if max_concurrent > 0
+        if Threads.atomic_add!(inflight, 1) >= max_concurrent
+            Threads.atomic_sub!(inflight, 1)
+            try
+                _trailers_only(stream, GRPC_RESOURCE_EXHAUSTED, "server at capacity")
+            catch
+            end
+            return nothing
+        end
+        admitted = true
+    end
 
+    # `ctx` is built inside the try so that a failure during construction (e.g. a
+    # malformed grpc-timeout header, which throws gRPCServiceCallException) is
+    # mapped to a well-formed gRPC trailer rather than escaping as an uncaught
+    # stream error.
+    local ctx
     try
+        ctx = _build_context(stream, request, payload)
+        ctx.sticky = sticky
         entry.dispatch(stream, ctx)
         _finish_ok(stream, ctx)
     catch err
-        _finish_error(stream, ctx, err)
+        if @isdefined(ctx)
+            _finish_error(stream, ctx, err)
+        elseif err isa gRPCServiceCallException
+            try
+                _trailers_only(stream, err.grpc_status, err.message)
+            catch
+            end
+        else
+            @error "gRPC dispatch error" exception = (err, catch_backtrace()) path = request.target
+            try
+                _trailers_only(stream, GRPC_INTERNAL, "internal error")
+            catch
+            end
+        end
     finally
+        admitted && Threads.atomic_sub!(inflight, 1)
         try
             HTTP.closeread(stream)
         catch

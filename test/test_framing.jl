@@ -71,4 +71,16 @@
     @test_throws gRPCServiceCallException read_message!(
         FrameReader(IOBuffer(full[1:end-3]), 4 * 1024 * 1024),
     )
+
+    # expect_half_close!: a non-streaming RPC must see exactly one message then a
+    # half-close. A clean end-of-stream is accepted; a stray extra frame is
+    # rejected with INVALID_ARGUMENT rather than drained in an unbounded loop.
+    using gRPCServer: expect_half_close!
+    @test expect_half_close!(FrameReader(IOBuffer(UInt8[]), 4 * 1024 * 1024)) === nothing
+    extra = IOBuffer()
+    write(extra, take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:3)))))
+    seekstart(extra)
+    @test_throws gRPCServiceCallException expect_half_close!(
+        FrameReader(extra, 4 * 1024 * 1024),
+    )
 end

@@ -15,14 +15,22 @@ Parse a gRPC `grpc-timeout` header value (e.g. `"10S"`, `"500m"`, `"100u"`,
 `"5n"`) and return an absolute monotonic deadline in nanoseconds (relative to
 `time_ns()`). Returns `0` when no timeout is present. This is the inverse of the
 client's `grpc_timeout_header_val`.
+
+The grpc spec constrains the value to 1-8 ASCII digits followed by a unit
+character. We enforce that (rejecting empty, over-long, signed, or non-numeric
+values) and use checked arithmetic so a hostile or absurd value yields a clean
+`INVALID_ARGUMENT` rather than a silently wrapped, garbage deadline.
 """
 function parse_grpc_timeout(value::AbstractString)::Int64
     isempty(value) && return Int64(0)
     unit = value[end]
-    num = tryparse(Int64, @view value[1:end-1])
-    num === nothing && throw(
-        gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "malformed grpc-timeout: $value"),
+    digits = @view value[1:end-1]
+    # Spec: TimeoutValue is 1-8 ASCII digits, no sign. `isdigit` admits only
+    # 0-9, so this also rejects '-', '+', and whitespace.
+    (isempty(digits) || length(digits) > 8 || !all(isdigit, digits)) && throw(
+        gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "malformed grpc-timeout: $(_clip(value))"),
     )
+    num = parse(Int64, digits)  # <= 8 digits always fits in Int64
     mult = if unit == 'H'
         3_600_000_000_000
     elseif unit == 'M'
@@ -39,11 +47,25 @@ function parse_grpc_timeout(value::AbstractString)::Int64
         throw(
             gRPCServiceCallException(
                 GRPC_INVALID_ARGUMENT,
-                "malformed grpc-timeout unit: $value",
+                "malformed grpc-timeout unit: $(_clip(value))",
             ),
         )
     end
-    return Int64(time_ns()) + num * mult
+    try
+        return Base.Checked.checked_add(Int64(time_ns()), Base.Checked.checked_mul(num, Int64(mult)))
+    catch err
+        err isa OverflowError && throw(
+            gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "grpc-timeout out of range: $(_clip(value))"),
+        )
+        rethrow()
+    end
+end
+
+# Truncate client-supplied text before echoing it back in an error message, so a
+# hostile peer cannot inflate a `grpc-message` trailer with an arbitrarily long
+# reflection of its own input.
+function _clip(s::AbstractString, n::Int = 128)
+    return length(s) > n ? string(first(s, n), "...") : String(s)
 end
 
 # Percent-encode a grpc-message per the gRPC spec: bytes outside printable ASCII

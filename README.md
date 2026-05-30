@@ -88,6 +88,35 @@ IO-bound workloads.
 - `deadline_exceeded(ctx)` / `iscancelled(ctx)`: cooperative deadline and
   cancellation checks
 
+## Security
+
+This package decodes untrusted, network-supplied frames, so deployments should
+account for the following.
+
+- Authentication and authorization are the application's responsibility. The
+  server does not authenticate callers; a handler reads credentials from request
+  metadata (`metadata(ctx, "authorization")`, etc.) and throws
+  `gRPCServiceCallException(GRPC_UNAUTHENTICATED, ...)` or `GRPC_PERMISSION_DENIED`
+  to reject. There is no built-in mutual TLS / client-certificate verification.
+- Use TLS in production. The default is cleartext HTTP/2 (h2c); pass `tls = true`
+  with `cert_file` / `key_file` to serve h2. Cleartext should only be used behind
+  a trusted boundary (for example a localhost sidecar or a TLS-terminating proxy).
+- Message size is bounded by `gRPCRouter(; max_recieve_message_length, max_send_message_length)`
+  (4 MiB each by default). Oversized frames are rejected with `RESOURCE_EXHAUSTED`
+  before the payload is buffered. Note this bounds a *single* message; aggregate
+  in-flight memory still scales with the number of concurrent streams.
+- `max_concurrent_requests` (a `serve!` keyword, `0` = unlimited) caps how many
+  RPCs run at once and sheds excess load with `RESOURCE_EXHAUSTED`, bounding that
+  aggregate exposure. Set it to a value sized to the host's memory and the
+  configured `max_recieve_message_length`.
+- Connection timeouts default to `read_header_timeout = 30` and
+  `idle_timeout = 300` seconds, which reap slow-header and idle connections
+  without disturbing established streams. `read_timeout` and `write_timeout` are
+  disabled by default; enabling them defends against a peer that trickles or
+  never finishes a request/response body, but a non-zero `read_timeout` also
+  terminates legitimately idle long-lived streaming RPCs, so set it only for
+  unary or short-lived workloads.
+
 ## Performance
 
 The framing layer reads request bytes directly into a single reusable buffer and

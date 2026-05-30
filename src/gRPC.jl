@@ -338,14 +338,20 @@ function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     return IOBuffer(payload)
 end
 
-# Consume any remaining request frames through end-of-stream. For unary and
-# server-streaming RPCs the client sends exactly one message and half-closes;
-# draining to EOF marks the request body fully consumed so HTTP.jl does not
-# force the underlying connection closed (which would cancel other multiplexed
-# streams under load).
-function drain_to_eof!(fr::FrameReader)
-    while read_message!(fr) !== nothing
-    end
+# For unary and server-streaming RPCs the client must send exactly one message
+# and half-close. We read one more frame: a clean half-close (`nothing`) means
+# the body is fully consumed, so HTTP.jl does not force the underlying
+# connection closed (which would cancel other multiplexed streams under load).
+# Any further message is a protocol violation, rejected here rather than drained
+# in an unbounded loop, so a misbehaving peer cannot pin the handler task by
+# streaming an endless run of frames into a single-message RPC.
+function expect_half_close!(fr::FrameReader)
+    read_message!(fr) === nothing || throw(
+        gRPCServiceCallException(
+            GRPC_INVALID_ARGUMENT,
+            "expected exactly one request message for a non-streaming request",
+        ),
+    )
     return nothing
 end
 
