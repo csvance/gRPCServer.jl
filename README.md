@@ -87,3 +87,47 @@ IO-bound workloads.
 - `set_trailing_metadata!(ctx, key, value)`: queue a trailing-metadata header
 - `deadline_exceeded(ctx)` / `iscancelled(ctx)`: cooperative deadline and
   cancellation checks
+
+## Performance
+
+The framing layer reads request bytes directly into a single reusable buffer and
+hands the decoder a view into it, so a received message is not copied between the
+socket and ProtoBuf decoding. A throughput and allocation benchmark lives under
+`benchmark/`:
+
+```
+julia --project=benchmark -e 'using Pkg; Pkg.instantiate()'   # first time
+julia --project=benchmark --threads=auto benchmark/run.jl
+```
+
+### Known limitation: HTTP/2 receive window caps large uploads
+
+Large client to server messages (big request protobufs and client-streaming) are
+bounded by the HTTP/2 flow-control window, not by anything in this package.
+HTTP.jl 2.0 advertises the protocol-default 64 KiB stream and connection windows
+(it sends an empty SETTINGS frame) and replenishes them as the handler reads the
+body. The practical effect is that in-flight upload bytes are capped near 64 KiB,
+so upload throughput is limited to roughly window / round-trip-time. On localhost
+this is invisible, but over a network with a 10 ms round trip it caps uploads
+near 6 MB/s regardless of message size. Downloads (server to client) are not
+affected the same way, since HTTP.jl already batches outgoing DATA frames.
+
+Raising the window is the largest available gain for uploads, but it is entirely
+inside HTTP.jl and there is no hook this package can use. It requires three
+coordinated, upstream changes:
+
+1. Advertise a larger `SETTINGS_INITIAL_WINDOW_SIZE` in the server's SETTINGS
+   frame (raises the per-stream window only)
+2. Send an initial `WINDOW_UPDATE` on stream 0 to raise the connection-level
+   window, which SETTINGS does not affect
+3. Raise the per-stream `max_buffered_bytes` (currently 256 KiB) to at least the
+   new window, so a fast client with a slow handler does not trip the buffer
+   limit
+
+The clean form exposes these as keyword arguments on `HTTP.Server` /
+`HTTP.listen!` that `serve!` then forwards.
+
+Transport tuning that is sometimes expected but does not apply here: there is no
+TCP send/receive buffer size knob in HTTP.jl 2.0 or its Reseau transport (the
+kernel autotunes), and `TCP_NODELAY` is already enabled by default, so small
+messages are not delayed by Nagle.
