@@ -189,51 +189,101 @@ function grpc_encode_message_iobuffer(
     return buf
 end
 
-grpc_encode_message_iobuffer(message; max_send_message_length = 4 * 1024 * 1024) =
-    grpc_encode_message_iobuffer(
+# Convenience method that allocates the framing buffer. `sizehint` (bytes,
+# including the 5-byte header) pre-grows that buffer so a large message does not
+# trigger repeated reallocation as it encodes; `0` keeps the default growth.
+function grpc_encode_message_iobuffer(
+    message;
+    max_send_message_length = 4 * 1024 * 1024,
+    sizehint::Integer = 0,
+)
+    buf = sizehint > 0 ? IOBuffer(; sizehint = Int(sizehint)) : IOBuffer()
+    return grpc_encode_message_iobuffer(
         message,
-        IOBuffer();
+        buf;
         max_send_message_length = max_send_message_length,
     )
+end
+
+# How many bytes to request from HTTP.jl per read. HTTP.jl's server-side
+# `readbytes!` allocates a temporary of exactly this size per call, so it is
+# capped rather than sized to the (possibly large) free tail of `buf`.
+const _FRAME_READ_CHUNK = 64 * 1024
+
+# `read_message!` returns an `IOBuffer` wrapping a view into the reader's buffer
+# (zero-copy). That view-backed buffer is a distinct concrete type from the
+# default `IOBuffer` alias (`GenericIOBuffer{Memory{UInt8}}`), so it is named
+# here and used as the return type, keeping the function type-stable.
+const _FrameView = SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int64}},true}
+const _FrameBuffer = Base.GenericIOBuffer{_FrameView}
 
 """
     FrameReader(stream, max_recieve_message_length)
 
 Pull-based decoder of the gRPC length-prefixed framing over an `HTTP.Stream`
 request body. The server analog of the client's push-based `handle_write`.
+
+A single growable `buf` holds the bytes pulled from the stream. `r` is the read
+offset (bytes `1:r` have been consumed) and `w` is the write offset (bytes
+`1:w` are valid). Stream bytes are read straight into the free tail of `buf`,
+and `read_message!` returns a view into `buf` rather than a copy, so a received
+message is not copied on its way to the decoder.
 """
-mutable struct FrameReader
-    stream::HTTP.Stream
+# Parametric on the source `IO` so the framing logic can be driven from a plain
+# `IOBuffer` in tests; in the server it is always an `HTTP.Stream`. `HTTP.readbytes!`
+# is `Base.readbytes!`, so it dispatches correctly for either source.
+mutable struct FrameReader{S<:IO}
+    stream::S
     max_recieve_message_length::Int64
-    chunk::Vector{UInt8}
-    carry::Vector{UInt8}
-    off::Int
+    buf::Vector{UInt8}
+    r::Int
+    w::Int
     eof::Bool
 end
 
-FrameReader(stream::HTTP.Stream, max_recieve_message_length::Integer) = FrameReader(
+FrameReader(stream::IO, max_recieve_message_length::Integer) = FrameReader(
     stream,
     Int64(max_recieve_message_length),
-    Vector{UInt8}(undef, 64 * 1024),
-    UInt8[],
+    Vector{UInt8}(undef, _FRAME_READ_CHUNK),
+    0,
     0,
     false,
 )
 
-@inline _avail(fr::FrameReader) = length(fr.carry) - fr.off
+@inline _avail(fr::FrameReader) = fr.w - fr.r
+
+# Make room to read more bytes while keeping `need` unconsumed bytes reachable.
+# Compaction (shifting the unconsumed tail to the front) is done only when the
+# consumed prefix has grown large or the buffer is full, rather than on every
+# call, so streaming many frames does not pay an O(remaining) memmove per frame.
+function _reserve!(fr::FrameReader, need::Int)
+    remaining = fr.w - fr.r
+    if fr.r > 0 && (fr.r >= remaining || length(fr.buf) == fr.w)
+        remaining > 0 && copyto!(fr.buf, 1, fr.buf, fr.r + 1, remaining)
+        fr.r = 0
+        fr.w = remaining
+    end
+    # Ensure the buffer can hold `need` unconsumed bytes and has tail room to
+    # read into. For a large message this grows `buf` to the message size once.
+    target = max(fr.r + need, fr.w + _FRAME_READ_CHUNK)
+    length(fr.buf) < target && resize!(fr.buf, target)
+    return nothing
+end
 
 # Ensure at least `n` unconsumed bytes are buffered, reading from the stream as
 # needed. Returns true if `n` bytes are available, false at end-of-stream.
 function _ensure!(fr::FrameReader, n::Int)
-    while _avail(fr) < n && !fr.eof
-        m = HTTP.readbytes!(fr.stream, fr.chunk, length(fr.chunk))
+    while (fr.w - fr.r) < n && !fr.eof
+        _reserve!(fr, n)
+        nb = min(length(fr.buf) - fr.w, _FRAME_READ_CHUNK)
+        m = HTTP.readbytes!(fr.stream, view(fr.buf, (fr.w+1):(fr.w+nb)), nb)
         if m == 0
             fr.eof = true
         else
-            append!(fr.carry, view(fr.chunk, 1:m))
+            fr.w += m
         end
     end
-    return _avail(fr) >= n
+    return (fr.w - fr.r) >= n
 end
 
 """
@@ -243,26 +293,21 @@ Return the next fully-framed message as an `IOBuffer` positioned at the start,
 or `nothing` at a clean half-close (end of the request stream). Throws
 `gRPCServiceCallException` on a compressed frame, an oversize length prefix, or a
 truncated frame.
-"""
-function read_message!(fr::FrameReader)::Union{Nothing,IOBuffer}
-    # Drop already-consumed bytes so appends stay cheap.
-    if fr.off > 0
-        deleteat!(fr.carry, 1:fr.off)
-        fr.off = 0
-    end
 
+The returned `IOBuffer` borrows the reader's internal storage. It is only valid
+until the next `read_message!` call (which may grow, compact, or reallocate that
+storage), so it must be fully decoded before reading the following message. All
+callers in this package decode immediately, which preserves that invariant.
+"""
+function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     if !_ensure!(fr, GRPC_HEADER_SIZE)
-        _avail(fr) == 0 && return nothing
+        (fr.w - fr.r) == 0 && return nothing
         throw(gRPCServiceCallException(GRPC_INTERNAL, "stream ended mid-frame (header)"))
     end
 
-    compressed = fr.carry[fr.off+1] > 0
-    len =
-        (UInt32(fr.carry[fr.off+2]) << 24) |
-        (UInt32(fr.carry[fr.off+3]) << 16) |
-        (UInt32(fr.carry[fr.off+4]) << 8) |
-        UInt32(fr.carry[fr.off+5])
-    fr.off += GRPC_HEADER_SIZE
+    compressed = fr.buf[fr.r+1] > 0
+    len = ntoh(reinterpret(UInt32, view(fr.buf, (fr.r+2):(fr.r+5)))[1])
+    fr.r += GRPC_HEADER_SIZE
 
     compressed && throw(
         gRPCServiceCallException(
@@ -280,14 +325,16 @@ function read_message!(fr::FrameReader)::Union{Nothing,IOBuffer}
         )
     end
 
-    len == 0 && return IOBuffer(UInt8[])
+    # Empty message: return an empty view of the same concrete type so every
+    # branch yields `_FrameBuffer`.
+    len == 0 && return IOBuffer(view(fr.buf, (fr.r+1):fr.r))
 
     if !_ensure!(fr, Int(len))
         throw(gRPCServiceCallException(GRPC_INTERNAL, "stream ended mid-frame (payload)"))
     end
 
-    payload = fr.carry[(fr.off+1):(fr.off+Int(len))]
-    fr.off += Int(len)
+    payload = view(fr.buf, (fr.r+1):(fr.r+Int(len)))
+    fr.r += Int(len)
     return IOBuffer(payload)
 end
 

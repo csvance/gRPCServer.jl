@@ -11,11 +11,7 @@
     @test bytes[1] == 0x00  # uncompressed flag
 
     # Big-endian UInt32 length prefix equals the payload size.
-    declared =
-        (UInt32(bytes[2]) << 24) |
-        (UInt32(bytes[3]) << 16) |
-        (UInt32(bytes[4]) << 8) |
-        UInt32(bytes[5])
+    declared = ntoh(reinterpret(UInt32, view(bytes, 2:5))[1])
     payload = bytes[(GRPC_HEADER_SIZE+1):end]
     @test declared == length(payload)
 
@@ -32,5 +28,47 @@
     @test_throws gRPCServiceCallException grpc_encode_message_iobuffer(
         TestResponse(collect(UInt64, 1:1000));
         max_send_message_length = 16,
+    )
+
+    # FrameReader read path: several frames concatenated into one source buffer,
+    # including an empty message and one larger than the reader's initial buffer
+    # (forces internal growth/compaction). Each returned IOBuffer borrows reader
+    # storage, so decoding immediately must round-trip every message. Driven from
+    # a plain IOBuffer, which the parametric FrameReader accepts.
+    using gRPCServer: FrameReader, read_message!
+
+    msgs = [
+        TestResponse(collect(UInt64, 1:7)),
+        TestResponse(UInt64[]),                  # empty frame (length 0)
+        TestResponse(collect(UInt64, 100:140)),
+        TestResponse(zeros(UInt64, 80_000)),     # > 64 KiB initial buffer
+        TestResponse(collect(UInt64, 1:3)),
+    ]
+
+    wire = IOBuffer()
+    for m in msgs
+        write(wire, take!(grpc_encode_message_iobuffer(m)))
+    end
+    seekstart(wire)
+
+    fr = FrameReader(wire, 4 * 1024 * 1024)
+    for m in msgs
+        io = read_message!(fr)
+        @test io !== nothing
+        @test decode(ProtoDecoder(io), TestResponse).data == m.data
+    end
+    # Clean end-of-stream after the last frame.
+    @test read_message!(fr) === nothing
+
+    # A length prefix exceeding max_recieve_message_length is rejected.
+    big = IOBuffer()
+    write(big, take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:1000)))))
+    seekstart(big)
+    @test_throws gRPCServiceCallException read_message!(FrameReader(big, 16))
+
+    # A frame truncated mid-payload raises rather than returning a short message.
+    full = take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:50))))
+    @test_throws gRPCServiceCallException read_message!(
+        FrameReader(IOBuffer(full[1:end-3]), 4 * 1024 * 1024),
     )
 end
