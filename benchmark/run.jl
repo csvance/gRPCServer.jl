@@ -99,7 +99,7 @@ end
 function endtoend_bench()
     # build_test_router defaults to 4 MiB caps; raise both for the big payloads.
     router = build_test_router(;
-        max_recieve_message_length = MAXMSG,
+        max_receive_message_length = MAXMSG,
         max_send_message_length = MAXMSG,
     )
     # Raise the server's HTTP/2 receive window (and the coordinated buffer cap)

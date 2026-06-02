@@ -22,7 +22,7 @@ See [TLS](tls.md).
 ## Message size limits
 
 Message size is bounded by
-`gRPCRouter(; max_recieve_message_length, max_send_message_length)` (4 MiB each
+`gRPCRouter(; max_receive_message_length, max_send_message_length)` (4 MiB each
 by default). Oversized frames are rejected with `GRPC_RESOURCE_EXHAUSTED` before
 the payload is buffered. Note this bounds a *single* message; aggregate in-flight
 memory still scales with the number of concurrent streams.
@@ -32,7 +32,7 @@ memory still scales with the number of concurrent streams.
 `max_concurrent_requests` (a [`serve!`](@ref) keyword, `0` = unlimited) caps how
 many RPCs run at once and sheds excess load with `GRPC_RESOURCE_EXHAUSTED`,
 bounding that aggregate exposure. Set it to a value sized to the host's memory
-and the configured `max_recieve_message_length`. See
+and the configured `max_receive_message_length`. See
 [Concurrency](concurrency.md#Concurrency-cap-and-load-shedding).
 
 ## Connection timeouts

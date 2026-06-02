@@ -99,7 +99,7 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
                 "127.0.0.1",
                 port;
                 max_send_message_length = 1024,
-                max_recieve_message_length = 1024,
+                max_receive_message_length = 1024,
             )
             # Sending too much is rejected client-side.
             @test_throws gRPCClient.gRPCServiceCallException gRPCClient.grpc_sync_request(

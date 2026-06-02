@@ -28,24 +28,24 @@ struct gRPCRouterEntry
 end
 
 """
-    gRPCRouter(; max_recieve_message_length=4MiB, max_send_message_length=4MiB)
+    gRPCRouter(; max_receive_message_length=4MiB, max_send_message_length=4MiB)
 
 Holds the path-to-handler routing table. Reusable and non-parametric: user
 application state is attached at `serve` time via `context=`, not here.
 """
 struct gRPCRouter
     routes::Dict{String,gRPCRouterEntry}
-    max_recieve_message_length::Int64
+    max_receive_message_length::Int64
     max_send_message_length::Int64
 end
 
 function gRPCRouter(;
-    max_recieve_message_length = 4 * 1024 * 1024,
+    max_receive_message_length = 4 * 1024 * 1024,
     max_send_message_length = 4 * 1024 * 1024,
 )
     return gRPCRouter(
         Dict{String,gRPCRouterEntry}(),
-        Int64(max_recieve_message_length),
+        Int64(max_receive_message_length),
         Int64(max_send_message_length),
     )
 end
@@ -173,6 +173,25 @@ _encode_body(buf::IOBuffer, message::AbstractVector{UInt8}) = UInt32(write(buf, 
 _decode_message(io, ::Type{T}) where {T} = decode(ProtoDecoder(io), T)
 _decode_message(io, ::Type{Vector{UInt8}}) = read(seekstart(io))
 
+# Decode a request message, mapping a malformed wire-format payload to
+# INVALID_ARGUMENT. A body that ProtoBuf.jl cannot parse is a client fault, not a
+# server bug, so it should not surface as INTERNAL (which would also risk echoing
+# ProtoBuf.jl internals back to the peer). A gRPCServiceCallException raised
+# deeper (e.g. an oversize nested frame) is passed through unchanged.
+function _decode_request(io, ::Type{T}) where {T}
+    try
+        return _decode_message(io, T)
+    catch err
+        err isa gRPCServiceCallException && rethrow()
+        throw(
+            gRPCServiceCallException(
+                GRPC_INVALID_ARGUMENT,
+                "failed to decode request message",
+            ),
+        )
+    end
+end
+
 function grpc_encode_message_iobuffer(
     message,
     buf::IOBuffer;
@@ -232,7 +251,7 @@ const _FrameView = SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int64}},true}
 const _FrameBuffer = Base.GenericIOBuffer{_FrameView}
 
 """
-    FrameReader(stream, max_recieve_message_length)
+    FrameReader(stream, max_receive_message_length)
 
 Pull-based decoder of the gRPC length-prefixed framing over an `HTTP.Stream`
 request body. The server analog of the client's push-based `handle_write`.
@@ -248,16 +267,16 @@ message is not copied on its way to the decoder.
 # is `Base.readbytes!`, so it dispatches correctly for either source.
 mutable struct FrameReader{S<:IO}
     stream::S
-    max_recieve_message_length::Int64
+    max_receive_message_length::Int64
     buf::Vector{UInt8}
     r::Int
     w::Int
     eof::Bool
 end
 
-FrameReader(stream::IO, max_recieve_message_length::Integer) = FrameReader(
+FrameReader(stream::IO, max_receive_message_length::Integer) = FrameReader(
     stream,
-    Int64(max_recieve_message_length),
+    Int64(max_receive_message_length),
     Vector{UInt8}(undef, _FRAME_READ_CHUNK),
     0,
     0,
@@ -330,11 +349,11 @@ function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
         ),
     )
 
-    if len > fr.max_recieve_message_length
+    if len > fr.max_receive_message_length
         throw(
             gRPCServiceCallException(
                 GRPC_RESOURCE_EXHAUSTED,
-                "length-prefix longer than max_recieve_message_length: $(len) > $(fr.max_recieve_message_length)",
+                "length-prefix longer than max_receive_message_length: $(len) > $(fr.max_receive_message_length)",
             ),
         )
     end

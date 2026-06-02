@@ -8,12 +8,12 @@ function _feed_requests(
     ::Type{TReq},
     router::gRPCRouter,
 ) where {TReq}
-    fr = FrameReader(stream, router.max_recieve_message_length)
+    fr = FrameReader(stream, router.max_receive_message_length)
     try
         while true
             io = read_message!(fr)
             io === nothing && break
-            put!(in, _decode_message(io, TReq))
+            put!(in, _decode_request(io, TReq))
         end
     catch err
         if _is_cancellation(err)
@@ -63,12 +63,12 @@ function _invoke_server_stream(
     fn,
     router::gRPCRouter,
 ) where {TReq,TResp}
-    fr = FrameReader(stream, router.max_recieve_message_length)
+    fr = FrameReader(stream, router.max_receive_message_length)
     io = read_message!(fr)
     io === nothing && throw(
         gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "server-stream request missing message"),
     )
-    req = _decode_message(io, TReq)
+    req = _decode_request(io, TReq)
     expect_half_close!(fr)
 
     out = Channel{TResp}(16)

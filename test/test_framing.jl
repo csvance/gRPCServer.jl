@@ -60,7 +60,7 @@
     # Clean end-of-stream after the last frame.
     @test read_message!(fr) === nothing
 
-    # A length prefix exceeding max_recieve_message_length is rejected.
+    # A length prefix exceeding max_receive_message_length is rejected.
     big = IOBuffer()
     write(big, take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:1000)))))
     seekstart(big)

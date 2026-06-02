@@ -73,7 +73,7 @@ serve!(router, "0.0.0.0", 50051; max_concurrent_requests = 256)
 ```
 
 Size the cap to the host's memory and the configured
-`max_recieve_message_length` (see [Security](security.md)).
+`max_receive_message_length` (see [Security](security.md)).
 
 ## Deadlines and cancellation
 

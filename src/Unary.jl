@@ -9,11 +9,11 @@ function _invoke_unary(
     fn,
     router::gRPCRouter,
 ) where {TReq,TResp}
-    fr = FrameReader(stream, router.max_recieve_message_length)
+    fr = FrameReader(stream, router.max_receive_message_length)
     io = read_message!(fr)
     io === nothing &&
         throw(gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "unary request missing message"))
-    req = _decode_message(io, TReq)
+    req = _decode_request(io, TReq)
     expect_half_close!(fr)
 
     resp = fn(req, ctx)::TResp

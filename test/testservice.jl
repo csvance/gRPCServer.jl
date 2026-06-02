@@ -26,11 +26,11 @@ const TESTSERVICE_TestBidirectionalStreamRPC =
     )
 
 function build_test_router(;
-    max_recieve_message_length = 4 * 1024 * 1024,
+    max_receive_message_length = 4 * 1024 * 1024,
     max_send_message_length = 4 * 1024 * 1024,
 )
     router = gRPCServer.gRPCRouter(;
-        max_recieve_message_length = max_recieve_message_length,
+        max_receive_message_length = max_receive_message_length,
         max_send_message_length = max_send_message_length,
     )
 
