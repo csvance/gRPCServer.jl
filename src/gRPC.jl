@@ -373,7 +373,37 @@ end
 # Registration
 # ---------------------------------------------------------------------------
 
-# Unary: fn(req::TReq, ctx) -> TResp
+"""
+    handle!(router::gRPCRouter, m::gRPCMethod, fn) -> router
+    handle!(fn, router::gRPCRouter, m::gRPCMethod) -> router
+
+Register the handler `fn` for the method described by `m` on `router`, returning
+the router so calls can be chained. The streaming flags carried in the
+[`gRPCMethod`](@ref) type select the expected handler signature; the dispatcher
+captured here is type-stable because `m` is concrete.
+
+The four forms are:
+
+  - **Unary** (`req`, `resp`): `fn(req::TReq, ctx) -> resp::TResp`
+  - **Server streaming** (`req`, stream `resp`): `fn(req::TReq, out::Channel{TResp}, ctx)`
+  - **Client streaming** (stream `req`, `resp`): `fn(in::Channel{TReq}, ctx) -> resp::TResp`
+  - **Bidirectional** (stream `req`, stream `resp`): `fn(in::Channel{TReq}, out::Channel{TResp}, ctx)`
+
+`ctx` is the [`gRPCContext`](@ref) carrying request metadata, the deadline, and
+the user `payload`. A handler may `throw` a [`gRPCServiceCallException`](@ref) to
+set the response status; any other exception maps to `GRPC_INTERNAL`.
+
+The second (do-block) form is equivalent and reads naturally for inline handlers:
+
+```julia
+handle!(router, MyService_GetThing_Method()) do req, ctx
+    Thing(query(ctx.payload.db, req.id))
+end
+```
+
+Registering against a generated `*_Method` descriptor (or via the generated
+`register_<Service>!` helper) is the usual path; see the Code Generation guide.
+"""
 function handle!(
     router::gRPCRouter,
     m::gRPCMethod{TReq,false,TResp,false},

@@ -57,6 +57,17 @@ import_cb(io, ctx, definitions) =
     mapreduce(x -> x isa CodeGenerators.ServiceType ? 1 : 0, +, values(definitions); init = 0) >
     0 && println(io, "import gRPCServer")
 
+"""
+    grpc_register_service_codegen()
+
+Register gRPCServer's external code generation handler with ProtoBuf.jl so that
+a subsequent `protojl` run emits server descriptors (`<Service>_<Rpc>_Method`
+builders and `register_<Service>!` helpers) for each `service` in the `.proto`.
+
+This is called automatically from the module's `__init__`, so it normally does
+not need to be invoked directly. It is exported so a host can re-register the
+handler explicitly if needed.
+"""
 grpc_register_service_codegen() = CodeGenerators.register_external_codegen_handler(
     "gRPCServer.jl";
     import_cb = import_cb,

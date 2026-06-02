@@ -1,0 +1,44 @@
+name: Documentation
+on:
+  push:
+    branches: ["master"]
+    tags: ["*"]
+  pull_request:
+    branches: ["master"]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+# Deploying to the gh-pages branch needs write access to repository contents;
+# statuses:write lets Documenter report the doc preview status on pull requests.
+permissions:
+  contents: write
+  statuses: write
+jobs:
+  docs:
+    name: Build and deploy documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Third-party actions are pinned to a full-length commit SHA (the tag in
+      # the trailing comment is for humans), matching the policy in ci.yml so a
+      # moved or compromised tag cannot silently change what runs in CI.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: julia-actions/setup-julia@4c0cb0fce8556fdb04a90347310e5db8b1f98fb9 # v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@d10a6fd8f31b12404a54613ebad242900567f2b9 # v2
+      - name: Instantiate docs environment
+        run: |
+          julia --project=docs -e '
+            using Pkg
+            Pkg.develop(PackageSpec(path = pwd()))
+            Pkg.instantiate()'
+      - name: Build and deploy
+        run: julia --project=docs docs/make.jl
+        env:
+          # GITHUB_TOKEN deploys via the gh-pages branch; set DOCUMENTER_KEY as a
+          # repository secret to deploy with an SSH deploy key instead.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
