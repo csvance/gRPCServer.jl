@@ -24,22 +24,15 @@ function service_cb(io, t::CodeGenerators.ServiceType, ctx::CodeGenerators.Conte
         response_type = _resolve_type_name(rpc.response_type)
         method_name = "$(service_name)_$(rpc.name)_Method"
 
+        # A builder function mirroring the client's *_Client constructor.
+        # TRequest / TResponse default to the generated proto types; override
+        # either (or both) with Vector{UInt8} to have the handler receive the raw
+        # request payload and/or return raw response bytes (partial decoding).
         println(
             io,
-            "const $(method_name) = gRPCServer.gRPCMethod{$request_type, $(rpc.request_stream), $response_type, $(rpc.response_stream)}(\"$rpc_path\")",
+            "$(method_name)(; TRequest=$request_type, TResponse=$response_type) = gRPCServer.gRPCMethod{TRequest, $(rpc.request_stream), TResponse, $(rpc.response_stream)}(\"$rpc_path\")",
         )
         do_export && println(io, "export $(method_name)")
-
-        # Raw variant: both sides are Vector{UInt8}, so the handler receives the
-        # raw request payload and returns raw response bytes (partial decoding).
-        # Register it with handle! exactly like the typed method. For mixed
-        # typed/raw handlers, construct gRPCMethod{...}("$rpc_path") directly.
-        raw_method_name = "$(service_name)_$(rpc.name)_RawMethod"
-        println(
-            io,
-            "const $(raw_method_name) = gRPCServer.gRPCMethod{Vector{UInt8}, $(rpc.request_stream), Vector{UInt8}, $(rpc.response_stream)}(\"$rpc_path\")",
-        )
-        do_export && println(io, "export $(raw_method_name)")
         println(io, "")
     end
 
@@ -51,7 +44,7 @@ function service_cb(io, t::CodeGenerators.ServiceType, ctx::CodeGenerators.Conte
         method_name = "$(service_name)_$(rpc.name)_Method"
         println(
             io,
-            "\t$(rpc.name) === nothing || gRPCServer.handle!(router, $(method_name), $(rpc.name))",
+            "\t$(rpc.name) === nothing || gRPCServer.handle!(router, $(method_name)(), $(rpc.name))",
         )
     end
     println(io, "\treturn router")

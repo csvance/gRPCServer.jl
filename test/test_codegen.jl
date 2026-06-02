@@ -10,40 +10,31 @@
         @test contains(generated, "# gRPCServer.jl BEGIN")
         @test contains(generated, "# gRPCServer.jl END")
 
-        # Per-RPC descriptor constants with correct streaming flags.
+        # Per-RPC descriptor builder functions with correct streaming flags. Type
+        # parameters come from overridable TRequest/TResponse kwargs (raw-buffer
+        # support), mirroring the client's *_Client constructor.
         @test contains(
             generated,
-            "const TestService_TestRPC_Method = gRPCServer.gRPCMethod{TestRequest, false, TestResponse, false}(\"/test.TestService/TestRPC\")",
+            "TestService_TestRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, false}(\"/test.TestService/TestRPC\")",
         )
         @test contains(
             generated,
-            "gRPCServer.gRPCMethod{TestRequest, false, TestResponse, true}(\"/test.TestService/TestServerStreamRPC\")",
+            "gRPCServer.gRPCMethod{TRequest, false, TResponse, true}(\"/test.TestService/TestServerStreamRPC\")",
         )
         @test contains(
             generated,
-            "gRPCServer.gRPCMethod{TestRequest, true, TestResponse, false}(\"/test.TestService/TestClientStreamRPC\")",
+            "gRPCServer.gRPCMethod{TRequest, true, TResponse, false}(\"/test.TestService/TestClientStreamRPC\")",
         )
         @test contains(
             generated,
-            "gRPCServer.gRPCMethod{TestRequest, true, TestResponse, true}(\"/test.TestService/TestBidirectionalStreamRPC\")",
+            "gRPCServer.gRPCMethod{TRequest, true, TResponse, true}(\"/test.TestService/TestBidirectionalStreamRPC\")",
         )
-
-        # Raw descriptor constants: both sides Vector{UInt8}, streaming flags preserved.
-        @test contains(
-            generated,
-            "const TestService_TestRPC_RawMethod = gRPCServer.gRPCMethod{Vector{UInt8}, false, Vector{UInt8}, false}(\"/test.TestService/TestRPC\")",
-        )
-        @test contains(
-            generated,
-            "gRPCServer.gRPCMethod{Vector{UInt8}, true, Vector{UInt8}, true}(\"/test.TestService/TestBidirectionalStreamRPC\")",
-        )
-        @test contains(generated, "export TestService_TestRPC_RawMethod")
 
         # register_<Service>! sugar.
         @test contains(generated, "function register_TestService!(router;")
         @test contains(
             generated,
-            "gRPCServer.handle!(router, TestService_TestRPC_Method, TestRPC)",
+            "gRPCServer.handle!(router, TestService_TestRPC_Method(), TestRPC)",
         )
 
         # Exports gated on namespace / always_use_modules.

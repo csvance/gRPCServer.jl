@@ -162,31 +162,23 @@ TestService_TestBidirectionalStreamRPC_Client(
 export TestService_TestBidirectionalStreamRPC_Client
 # gRPCClient.jl END
 # gRPCServer.jl BEGIN
-const TestService_TestRPC_Method = gRPCServer.gRPCMethod{TestRequest, false, TestResponse, false}("/test.TestService/TestRPC")
+TestService_TestRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, false}("/test.TestService/TestRPC")
 export TestService_TestRPC_Method
-const TestService_TestRPC_RawMethod = gRPCServer.gRPCMethod{Vector{UInt8}, false, Vector{UInt8}, false}("/test.TestService/TestRPC")
-export TestService_TestRPC_RawMethod
 
-const TestService_TestServerStreamRPC_Method = gRPCServer.gRPCMethod{TestRequest, false, TestResponse, true}("/test.TestService/TestServerStreamRPC")
+TestService_TestServerStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, true}("/test.TestService/TestServerStreamRPC")
 export TestService_TestServerStreamRPC_Method
-const TestService_TestServerStreamRPC_RawMethod = gRPCServer.gRPCMethod{Vector{UInt8}, false, Vector{UInt8}, true}("/test.TestService/TestServerStreamRPC")
-export TestService_TestServerStreamRPC_RawMethod
 
-const TestService_TestClientStreamRPC_Method = gRPCServer.gRPCMethod{TestRequest, true, TestResponse, false}("/test.TestService/TestClientStreamRPC")
+TestService_TestClientStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, false}("/test.TestService/TestClientStreamRPC")
 export TestService_TestClientStreamRPC_Method
-const TestService_TestClientStreamRPC_RawMethod = gRPCServer.gRPCMethod{Vector{UInt8}, true, Vector{UInt8}, false}("/test.TestService/TestClientStreamRPC")
-export TestService_TestClientStreamRPC_RawMethod
 
-const TestService_TestBidirectionalStreamRPC_Method = gRPCServer.gRPCMethod{TestRequest, true, TestResponse, true}("/test.TestService/TestBidirectionalStreamRPC")
+TestService_TestBidirectionalStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, true}("/test.TestService/TestBidirectionalStreamRPC")
 export TestService_TestBidirectionalStreamRPC_Method
-const TestService_TestBidirectionalStreamRPC_RawMethod = gRPCServer.gRPCMethod{Vector{UInt8}, true, Vector{UInt8}, true}("/test.TestService/TestBidirectionalStreamRPC")
-export TestService_TestBidirectionalStreamRPC_RawMethod
 
 function register_TestService!(router; TestRPC=nothing, TestServerStreamRPC=nothing, TestClientStreamRPC=nothing, TestBidirectionalStreamRPC=nothing)
-	TestRPC === nothing || gRPCServer.handle!(router, TestService_TestRPC_Method, TestRPC)
-	TestServerStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestServerStreamRPC_Method, TestServerStreamRPC)
-	TestClientStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestClientStreamRPC_Method, TestClientStreamRPC)
-	TestBidirectionalStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestBidirectionalStreamRPC_Method, TestBidirectionalStreamRPC)
+	TestRPC === nothing || gRPCServer.handle!(router, TestService_TestRPC_Method(), TestRPC)
+	TestServerStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestServerStreamRPC_Method(), TestServerStreamRPC)
+	TestClientStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestClientStreamRPC_Method(), TestClientStreamRPC)
+	TestBidirectionalStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestBidirectionalStreamRPC_Method(), TestBidirectionalStreamRPC)
 	return router
 end
 export register_TestService!

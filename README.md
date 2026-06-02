@@ -13,7 +13,7 @@ Both cleartext HTTP/2 (h2c) and HTTP/2 over TLS (h2) are supported.
 
 Register the codegen handler (done automatically when the package is loaded),
 then run ProtoBuf.jl's `protojl` on your `.proto` files. For each `service`,
-gRPCServer emits one descriptor constant per RPC plus a `register_<Service>!`
+gRPCServer emits one descriptor builder per RPC plus a `register_<Service>!`
 convenience:
 
 ```julia
@@ -54,11 +54,34 @@ server = serve!(router, "0.0.0.0", 50051; context = AppState(open_db()))
 # ... wait(server) to block, close(server) for graceful shutdown
 ```
 
-Handlers can also be registered individually against the generated descriptors:
+Handlers can also be registered individually against the generated descriptors.
+Each `*_Method` is a builder function (mirroring gRPCClient.jl's `*_Client`
+constructor) whose `TRequest` / `TResponse` keyword arguments default to the proto
+message types:
 
 ```julia
-handle!(router, MyService_GetThing_Method) do req, ctx
+handle!(router, MyService_GetThing_Method()) do req, ctx
     Thing(query(ctx.payload.db, req.id))
+end
+```
+
+#### Raw request / response buffers (partial decoding)
+
+Override `TRequest` and/or `TResponse` with `Vector{UInt8}` to have the handler
+receive the raw, undecoded protobuf payload and/or return raw response bytes,
+instead of a typed message. This lets a handler partially decode only the fields
+it needs, or forward bytes it already holds. The raw buffer is the protobuf
+message body only; the gRPC framing is still handled by the library.
+
+```julia
+# Both sides raw
+handle!(router, MyService_GetThing_Method(; TRequest = Vector{UInt8}, TResponse = Vector{UInt8})) do req, ctx
+    # req::Vector{UInt8}; return a Vector{UInt8}
+end
+
+# Mixed: typed request, raw response
+handle!(router, MyService_GetThing_Method(; TResponse = Vector{UInt8})) do req, ctx
+    # req::MyRequest; return a Vector{UInt8}
 end
 ```
 

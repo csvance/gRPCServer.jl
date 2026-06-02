@@ -139,7 +139,8 @@ end
 # as emitted into gen/test/test_pb.jl.
 @testset "Raw codegen stubs end-to-end" begin
     router = gRPCServer.gRPCRouter()
-    gRPCServer.handle!(router, TestService_TestRPC_RawMethod) do req::Vector{UInt8}, ctx
+    raw_method = TestService_TestRPC_Method(; TRequest = Vector{UInt8}, TResponse = Vector{UInt8})
+    gRPCServer.handle!(router, raw_method) do req::Vector{UInt8}, ctx
         decoded = _pb_decode(TestRequest, req)
         return _pb_encode(TestResponse(collect(UInt64, 1:decoded.test_response_sz)))
     end
