@@ -13,7 +13,7 @@ function _feed_requests(
         while true
             io = read_message!(fr)
             io === nothing && break
-            put!(in, decode(ProtoDecoder(io), TReq))
+            put!(in, _decode_message(io, TReq))
         end
     catch err
         if _is_cancellation(err)
@@ -68,7 +68,7 @@ function _invoke_server_stream(
     io === nothing && throw(
         gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "server-stream request missing message"),
     )
-    req = decode(ProtoDecoder(io), TReq)
+    req = _decode_message(io, TReq)
     expect_half_close!(fr)
 
     out = Channel{TResp}(16)

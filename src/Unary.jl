@@ -13,7 +13,7 @@ function _invoke_unary(
     io = read_message!(fr)
     io === nothing &&
         throw(gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "unary request missing message"))
-    req = decode(ProtoDecoder(io), TReq)
+    req = _decode_message(io, TReq)
     expect_half_close!(fr)
 
     resp = fn(req, ctx)::TResp

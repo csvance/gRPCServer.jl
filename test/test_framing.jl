@@ -83,4 +83,23 @@
     @test_throws gRPCServiceCallException expect_half_close!(
         FrameReader(extra, 4 * 1024 * 1024),
     )
+
+    # Raw passthrough: when the message body is a Vector{UInt8},
+    # grpc_encode_message_iobuffer writes the bytes through unchanged, and
+    # _decode_message(io, Vector{UInt8}) returns an identical fresh copy. Verified
+    # through a FrameReader, including the empty-message case.
+    using gRPCServer: _decode_message
+    raw_payload =
+        take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:9))))[(GRPC_HEADER_SIZE+1):end]
+    for body in (raw_payload, UInt8[])
+        framed = take!(grpc_encode_message_iobuffer(body))
+        @test framed[1] == 0x00
+        @test ntoh(reinterpret(UInt32, view(framed, 2:5))[1]) == length(body)
+        got = _decode_message(
+            read_message!(FrameReader(IOBuffer(framed), 4 * 1024 * 1024)),
+            Vector{UInt8},
+        )
+        @test got == body
+        @test got !== body  # fresh copy, not a view into reader storage
+    end
 end

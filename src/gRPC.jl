@@ -158,6 +158,21 @@ Encode `message` into the 5-byte gRPC length-prefixed framing (1 compression
 byte set to 0, then a big-endian `UInt32` length, then the ProtoBuf payload).
 Mirrors the client's `grpc_encode_request_iobuffer`.
 """
+# Write the message body into `buf` and return the number of bytes written. The
+# generic method ProtoBuf-encodes a typed message; the `AbstractVector{UInt8}`
+# method writes an already-encoded protobuf payload verbatim, enabling raw /
+# partial-decode responses (a method whose `TResponse` is `Vector{UInt8}`).
+_encode_body(buf::IOBuffer, message) = UInt32(encode(ProtoEncoder(buf), message))
+_encode_body(buf::IOBuffer, message::AbstractVector{UInt8}) = UInt32(write(buf, message))
+
+# Turn a received message `IOBuffer` into the value handed to the handler. The
+# generic method ProtoBuf-decodes into `T`; the `Vector{UInt8}` method returns a
+# fresh copy of the raw protobuf payload, enabling raw / partial decoding. The
+# copy matters: `read_message!` returns a buffer borrowing the FrameReader's
+# internal storage, valid only until the next read.
+_decode_message(io, ::Type{T}) where {T} = decode(ProtoDecoder(io), T)
+_decode_message(io, ::Type{Vector{UInt8}}) = read(seekstart(io))
+
 function grpc_encode_message_iobuffer(
     message,
     buf::IOBuffer;
@@ -168,8 +183,7 @@ function grpc_encode_message_iobuffer(
     write(buf, UInt8(0))
     write(buf, UInt32(0))
 
-    e = ProtoEncoder(buf)
-    sz = UInt32(encode(e, message))
+    sz = _encode_body(buf, message)
 
     end_pos = position(buf)
 

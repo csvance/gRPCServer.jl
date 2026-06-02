@@ -22,6 +22,7 @@ include("testservice.jl")
     include("test_framing.jl")
     include("test_status.jl")
     include("test_integration.jl")
+    include("test_raw.jl")
     if !haskey(ENV, "GRPC_SERVER_TEST_SKIP_LOAD")
         include("test_load.jl")
     end

@@ -28,6 +28,17 @@
             "gRPCServer.gRPCMethod{TestRequest, true, TestResponse, true}(\"/test.TestService/TestBidirectionalStreamRPC\")",
         )
 
+        # Raw descriptor constants: both sides Vector{UInt8}, streaming flags preserved.
+        @test contains(
+            generated,
+            "const TestService_TestRPC_RawMethod = gRPCServer.gRPCMethod{Vector{UInt8}, false, Vector{UInt8}, false}(\"/test.TestService/TestRPC\")",
+        )
+        @test contains(
+            generated,
+            "gRPCServer.gRPCMethod{Vector{UInt8}, true, Vector{UInt8}, true}(\"/test.TestService/TestBidirectionalStreamRPC\")",
+        )
+        @test contains(generated, "export TestService_TestRPC_RawMethod")
+
         # register_<Service>! sugar.
         @test contains(generated, "function register_TestService!(router;")
         @test contains(

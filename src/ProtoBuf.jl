@@ -29,6 +29,17 @@ function service_cb(io, t::CodeGenerators.ServiceType, ctx::CodeGenerators.Conte
             "const $(method_name) = gRPCServer.gRPCMethod{$request_type, $(rpc.request_stream), $response_type, $(rpc.response_stream)}(\"$rpc_path\")",
         )
         do_export && println(io, "export $(method_name)")
+
+        # Raw variant: both sides are Vector{UInt8}, so the handler receives the
+        # raw request payload and returns raw response bytes (partial decoding).
+        # Register it with handle! exactly like the typed method. For mixed
+        # typed/raw handlers, construct gRPCMethod{...}("$rpc_path") directly.
+        raw_method_name = "$(service_name)_$(rpc.name)_RawMethod"
+        println(
+            io,
+            "const $(raw_method_name) = gRPCServer.gRPCMethod{Vector{UInt8}, $(rpc.request_stream), Vector{UInt8}, $(rpc.response_stream)}(\"$rpc_path\")",
+        )
+        do_export && println(io, "export $(raw_method_name)")
         println(io, "")
     end
 
