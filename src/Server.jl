@@ -29,12 +29,12 @@ Keyword arguments:
   `read_timeout` will also terminate a legitimately idle long-lived streaming
   RPC, so enable it only for unary or short-lived workloads.
 - `reuseaddr`, `backlog`, `max_header_bytes`: forwarded to `HTTP.listen!`.
-- `h2_initial_window_size`, `h2_connection_window_size`, `h2_max_buffered_bytes`:
-  HTTP/2 flow-control window tuning, forwarded to `HTTP.listen!`. The defaults are
-  the protocol defaults, so behavior is unchanged unless set. Raising the windows
-  lifts the per-stream upload throughput cap of roughly `window / RTT` on links
-  with non-trivial latency; `h2_max_buffered_bytes` must be at least
-  `h2_initial_window_size`. Requires the HTTP.jl fork that exposes these keywords.
+- `h2_initial_window_size`, `h2_connection_window_size`: HTTP/2 flow-control window
+  tuning, passed to `HTTP.listen!` as an `HTTP.HTTP2Settings`. The defaults are the
+  protocol defaults, so behavior is unchanged unless set. Raising the windows lifts
+  the per-stream upload throughput cap of roughly `window / RTT` on links with
+  non-trivial latency. The per-stream receive buffer cap is derived from the window
+  inside HTTP.jl. Requires the HTTP.jl fork that exposes `HTTP2Settings`.
 """
 function serve!(
     router::gRPCRouter,
@@ -56,7 +56,6 @@ function serve!(
     backlog::Integer = 128,
     h2_initial_window_size::Integer = 65535,
     h2_connection_window_size::Integer = 65535,
-    h2_max_buffered_bytes::Integer = 256 * 1024,
 )
     inflight = Threads.Atomic{Int}(0)
     limit = Int(max_concurrent_requests)
@@ -85,9 +84,10 @@ function serve!(
             write_timeout = write_timeout,
             idle_timeout = idle_timeout,
             max_header_bytes = max_header_bytes,
-            h2_initial_window_size = h2_initial_window_size,
-            h2_connection_window_size = h2_connection_window_size,
-            h2_max_buffered_bytes = h2_max_buffered_bytes,
+            http2_settings = HTTP.HTTP2Settings(
+                initial_window_size = h2_initial_window_size,
+                connection_window_size = h2_connection_window_size,
+            ),
         )
     else
         return HTTP.listen!(
@@ -101,9 +101,10 @@ function serve!(
             max_header_bytes = max_header_bytes,
             reuseaddr = reuseaddr,
             backlog = backlog,
-            h2_initial_window_size = h2_initial_window_size,
-            h2_connection_window_size = h2_connection_window_size,
-            h2_max_buffered_bytes = h2_max_buffered_bytes,
+            http2_settings = HTTP.HTTP2Settings(
+                initial_window_size = h2_initial_window_size,
+                connection_window_size = h2_connection_window_size,
+            ),
         )
     end
 end

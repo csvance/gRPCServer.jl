@@ -95,7 +95,6 @@ end
             0;
             h2_initial_window_size = W,
             h2_connection_window_size = W,
-            h2_max_buffered_bytes = W,
         )
         port = HTTP.port(server)
         sleep(0.3)
@@ -119,14 +118,14 @@ end
         end
     end
 
-    # Invalid window config is rejected (max_buffered_bytes below the window).
+    # Invalid window config is rejected (connection window below the protocol
+    # default of 65535, which HTTP2Settings cannot advertise).
     @testset "HTTP/2 window config validation" begin
         @test_throws ArgumentError gRPCServer.serve!(
             gRPCServer.gRPCRouter(),
             "127.0.0.1",
             0;
-            h2_initial_window_size = 1024 * 1024,
-            h2_max_buffered_bytes = 4096,
+            h2_connection_window_size = 1024,
         )
     end
 end
