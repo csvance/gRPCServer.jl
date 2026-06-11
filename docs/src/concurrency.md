@@ -3,6 +3,11 @@
 This page covers how the server runs handlers across tasks and threads, the
 sticky task option, the concurrency cap, and cooperative deadlines.
 
+!!! warning "Streaming is unstable in v0.1"
+    The pump-task model described below applies to streaming RPCs, which are
+    unstable in this release and gated behind `allow_unstable_streaming = true`.
+    See [Streaming](streaming.md). Unary RPCs do not use pump tasks.
+
 ## Threading model
 
 The server is built on HTTP.jl, which spawns one task per inbound HTTP/2 stream.
@@ -93,7 +98,7 @@ interrupted:
 - [`iscancelled`](@ref)`(ctx)` returns `true` if the request has been cancelled.
 
 ```julia
-handle!(router, MyService_ListThings_Method()) do req, out, ctx
+handle!(router, MyService_ListThings_Method(); allow_unstable_streaming = true) do req, out, ctx
     for t in things(ctx.payload.db)
         (deadline_exceeded(ctx) || iscancelled(ctx)) && break
         put!(out, t)

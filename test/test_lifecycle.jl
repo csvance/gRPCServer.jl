@@ -131,17 +131,47 @@ end
         @test resp.status == 405
         @test HTTP.header(resp.trailers, "grpc-status") == string(GRPC_INTERNAL)
 
-        # Wrong content-type: HTTP 415 per the gRPC HTTP/2 spec.
+        # Wrong content-type: HTTP 415 per the gRPC HTTP/2 spec. Sent with an
+        # empty body (END_STREAM on HEADERS, no DATA frame): the server rejects
+        # on content-type before reading any body, and an empty body leaves
+        # nothing to abort, so this avoids the inherent race where a server that
+        # rejects mid-upload resets the stream while the client is still writing
+        # its request body (which surfaces to the client as a ProtocolError
+        # rather than the trailers response). That upload-abort race is a real
+        # pre-handler-rejection behavior, exercised separately below.
         resp2 = HTTP.request(
             "POST",
             url,
-            ["Content-Type" => "text/plain"],
-            _framed_request(TestRequest(1, UInt64[]));
+            ["Content-Type" => "text/plain"];
             protocol = :h2,
             status_exception = false,
         )
         @test resp2.status == 415
         @test HTTP.header(resp2.trailers, "grpc-status") == string(GRPC_INTERNAL)
+
+        # Body-bearing rejection: the server rejects on content-type without
+        # reading the request body, so depending on timing the client either
+        # gets the 415 trailers response or sees the stream reset mid-upload.
+        # Both outcomes mean "rejected before handler"; assert the rejection
+        # happened, not which form it took.
+        rejected = false
+        for _ = 1:5
+            try
+                r = HTTP.request(
+                    "POST",
+                    url,
+                    ["Content-Type" => "text/plain"],
+                    _framed_request(TestRequest(1, UInt64[]));
+                    protocol = :h2,
+                    status_exception = false,
+                )
+                rejected = r.status == 415
+            catch e
+                rejected = e isa HTTP.ProtocolError
+            end
+            rejected || break
+        end
+        @test rejected
 
         # A well-formed request on the same connection still works.
         resp3 = HTTP.request(
@@ -164,7 +194,7 @@ end
         # set_initial_metadata! in a server-streaming handler always threw and
         # the RPC failed with INTERNAL. It must now reach the response headers.
         router = gRPCServer.gRPCRouter()
-        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC) do req, out, ctx
+        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC; allow_unstable_streaming = true) do req, out, ctx
             gRPCServer.set_initial_metadata!(ctx, "x-init", "streaming")
             for i = 1:req.test_response_sz
                 put!(out, TestResponse(collect(UInt64, 1:i)))
@@ -196,7 +226,7 @@ end
         # forever; with max_concurrent_requests=1 the follow-up RPC below would
         # then be shed with RESOURCE_EXHAUSTED.
         router = gRPCServer.gRPCRouter()
-        gRPCServer.handle!(router, TESTSERVICE_TestClientStreamRPC) do in, ctx
+        gRPCServer.handle!(router, TESTSERVICE_TestClientStreamRPC; allow_unstable_streaming = true) do in, ctx
             first_req = take!(in)
             TestResponse(UInt64[first_req.test_response_sz])
         end
@@ -236,7 +266,7 @@ end
         # probe uses the raw h2c client on its own connection.
         router = gRPCServer.gRPCRouter()
         handler_returned = Threads.Atomic{Bool}(false)
-        gRPCServer.handle!(router, TESTSERVICE_TestBidirectionalStreamRPC) do in, out, ctx
+        gRPCServer.handle!(router, TESTSERVICE_TestBidirectionalStreamRPC; allow_unstable_streaming = true) do in, out, ctx
             first_req = take!(in)
             put!(out, TestResponse(UInt64[first_req.test_response_sz]))
             handler_returned[] = true
@@ -281,7 +311,7 @@ end
         # The pump must be joined before trailers, and the handler's status must
         # arrive intact after some messages have already been streamed.
         router = gRPCServer.gRPCRouter()
-        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC) do req, out, ctx
+        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC; allow_unstable_streaming = true) do req, out, ctx
             for i = 1:3
                 put!(out, TestResponse(collect(UInt64, 1:i)))
             end
@@ -323,7 +353,7 @@ end
         # (and the client sees RESOURCE_EXHAUSTED) instead of hanging forever.
         router = gRPCServer.gRPCRouter(; max_send_message_length = 64)
         handler_finished = Threads.Atomic{Bool}(false)
-        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC) do req, out, ctx
+        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC; allow_unstable_streaming = true) do req, out, ctx
             try
                 for _ = 1:100
                     put!(out, TestResponse(zeros(UInt64, 64)))  # ~520B > 64B cap

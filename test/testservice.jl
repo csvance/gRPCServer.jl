@@ -38,13 +38,23 @@ function build_test_router(;
         TestResponse(collect(UInt64, 1:req.test_response_sz))
     end
 
-    gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC) do req, out, ctx
+    # Streaming is unstable in v0.1 and gated behind allow_unstable_streaming;
+    # the test suite opts in to exercise it (against the patched HTTP.jl fork).
+    gRPCServer.handle!(
+        router,
+        TESTSERVICE_TestServerStreamRPC;
+        allow_unstable_streaming = true,
+    ) do req, out, ctx
         for i = 1:req.test_response_sz
             put!(out, TestResponse(collect(UInt64, 1:i)))
         end
     end
 
-    gRPCServer.handle!(router, TESTSERVICE_TestClientStreamRPC) do in, ctx
+    gRPCServer.handle!(
+        router,
+        TESTSERVICE_TestClientStreamRPC;
+        allow_unstable_streaming = true,
+    ) do in, ctx
         n = 0
         for _ in in
             n += 1
@@ -52,7 +62,11 @@ function build_test_router(;
         TestResponse(collect(UInt64, 1:n))
     end
 
-    gRPCServer.handle!(router, TESTSERVICE_TestBidirectionalStreamRPC) do in, out, ctx
+    gRPCServer.handle!(
+        router,
+        TESTSERVICE_TestBidirectionalStreamRPC;
+        allow_unstable_streaming = true,
+    ) do in, out, ctx
         i = 0
         for _ in in
             i += 1

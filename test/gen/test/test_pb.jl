@@ -87,6 +87,7 @@ TestService_TestRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
+	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, false, TResponse, false}(
 	host, port, "/test.TestService/TestRPC";
 	secure=secure,
@@ -95,6 +96,7 @@ TestService_TestRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
+	token=token,
 )
 export TestService_TestRPC_Client
 
@@ -108,6 +110,7 @@ TestService_TestServerStreamRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
+	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, false, TResponse, true}(
 	host, port, "/test.TestService/TestServerStreamRPC";
 	secure=secure,
@@ -116,6 +119,7 @@ TestService_TestServerStreamRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
+	token=token,
 )
 export TestService_TestServerStreamRPC_Client
 
@@ -129,6 +133,7 @@ TestService_TestClientStreamRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
+	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, true, TResponse, false}(
 	host, port, "/test.TestService/TestClientStreamRPC";
 	secure=secure,
@@ -137,6 +142,7 @@ TestService_TestClientStreamRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
+	token=token,
 )
 export TestService_TestClientStreamRPC_Client
 
@@ -150,6 +156,7 @@ TestService_TestBidirectionalStreamRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
+	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, true, TResponse, true}(
 	host, port, "/test.TestService/TestBidirectionalStreamRPC";
 	secure=secure,
@@ -158,6 +165,7 @@ TestService_TestBidirectionalStreamRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
+	token=token,
 )
 export TestService_TestBidirectionalStreamRPC_Client
 # gRPCClient.jl END
@@ -165,20 +173,23 @@ export TestService_TestBidirectionalStreamRPC_Client
 TestService_TestRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, false}("/test.TestService/TestRPC")
 export TestService_TestRPC_Method
 
+# !!! WARNING: streaming RPC; unstable in gRPCServer v0.1 (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the Streaming docs.
 TestService_TestServerStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, true}("/test.TestService/TestServerStreamRPC")
 export TestService_TestServerStreamRPC_Method
 
+# !!! WARNING: streaming RPC; unstable in gRPCServer v0.1 (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the Streaming docs.
 TestService_TestClientStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, false}("/test.TestService/TestClientStreamRPC")
 export TestService_TestClientStreamRPC_Method
 
+# !!! WARNING: streaming RPC; unstable in gRPCServer v0.1 (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the Streaming docs.
 TestService_TestBidirectionalStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, true}("/test.TestService/TestBidirectionalStreamRPC")
 export TestService_TestBidirectionalStreamRPC_Method
 
-function register_TestService!(router; TestRPC=nothing, TestServerStreamRPC=nothing, TestClientStreamRPC=nothing, TestBidirectionalStreamRPC=nothing)
+function register_TestService!(router; allow_unstable_streaming=false, TestRPC=nothing, TestServerStreamRPC=nothing, TestClientStreamRPC=nothing, TestBidirectionalStreamRPC=nothing)
 	TestRPC === nothing || gRPCServer.handle!(router, TestService_TestRPC_Method(), TestRPC)
-	TestServerStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestServerStreamRPC_Method(), TestServerStreamRPC)
-	TestClientStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestClientStreamRPC_Method(), TestClientStreamRPC)
-	TestBidirectionalStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestBidirectionalStreamRPC_Method(), TestBidirectionalStreamRPC)
+	TestServerStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestServerStreamRPC_Method(), TestServerStreamRPC; allow_unstable_streaming=allow_unstable_streaming)
+	TestClientStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestClientStreamRPC_Method(), TestClientStreamRPC; allow_unstable_streaming=allow_unstable_streaming)
+	TestBidirectionalStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestBidirectionalStreamRPC_Method(), TestBidirectionalStreamRPC; allow_unstable_streaming=allow_unstable_streaming)
 	return router
 end
 export register_TestService!

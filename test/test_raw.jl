@@ -49,8 +49,12 @@ function build_raw_router()
         return TestResponse(collect(UInt64, 1:decoded.test_response_sz))
     end
 
-    # raw request -> raw response stream.
-    gRPCServer.handle!(router, RAW_SERVERSTREAM) do req::Vector{UInt8}, out, ctx
+    # raw request -> raw response stream. Streaming is gated in v0.1; opt in.
+    gRPCServer.handle!(
+        router,
+        RAW_SERVERSTREAM;
+        allow_unstable_streaming = true,
+    ) do req::Vector{UInt8}, out, ctx
         decoded = _pb_decode(TestRequest, req)
         for i = 1:decoded.test_response_sz
             put!(out, _pb_encode(TestResponse(collect(UInt64, 1:i))))

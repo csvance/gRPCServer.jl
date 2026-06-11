@@ -9,10 +9,18 @@ instead of libCURL for transport.
 
 Both cleartext HTTP/2 (h2c) and HTTP/2 over TLS (h2) are supported.
 
+!!! danger "v0.1 supports unary RPCs only"
+    Streaming RPCs (server-streaming, client-streaming, bidirectional) are
+    implemented but **unstable** in this release: they have known HTTP/2
+    lifecycle problems and are gated behind an explicit
+    `allow_unstable_streaming = true` opt-in. Use only unary RPCs in production
+    for now. See [Streaming](streaming.md) for details.
+
 ## Features
 
-- All four gRPC method types: unary, server streaming, client streaming, and
-  bidirectional streaming
+- Unary RPCs, production-ready
+- Server-streaming, client-streaming, and bidirectional RPCs, **unstable in
+  v0.1** and opt-in only (see [Streaming](streaming.md))
 - ProtoBuf.jl code generation that emits per-RPC descriptors and a
   `register_<Service>!` helper per service
 - An Oxygen.jl-style router with user application state attached at serve time

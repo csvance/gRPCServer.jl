@@ -113,3 +113,53 @@ end
     @test err isa gRPCServiceCallException
     @test err.grpc_status == gRPCServer.GRPC_UNIMPLEMENTED
 end
+
+@testset "Streaming registration is gated in v0.1" begin
+    # Streaming RPCs are unstable in v0.1: handle! must reject them unless the
+    # caller explicitly opts in, while unary registration is unaffected.
+    unary = gRPCServer.gRPCMethod{TestRequest,false,TestResponse,false}("/t.S/U")
+    server_stream = gRPCServer.gRPCMethod{TestRequest,false,TestResponse,true}("/t.S/SS")
+    client_stream = gRPCServer.gRPCMethod{TestRequest,true,TestResponse,false}("/t.S/CS")
+    bidi = gRPCServer.gRPCMethod{TestRequest,true,TestResponse,true}("/t.S/BD")
+    noop2 = (a, b) -> a
+    noop3 = (a, b, c) -> a
+
+    # Unary registers freely, with or without the keyword.
+    @test gRPCServer.handle!(gRPCServer.gRPCRouter(), unary, noop2) isa gRPCServer.gRPCRouter
+    @test gRPCServer.handle!(
+        gRPCServer.gRPCRouter(),
+        unary,
+        noop2;
+        allow_unstable_streaming = true,
+    ) isa gRPCServer.gRPCRouter
+
+    # Each streaming shape throws without the opt-in, and the message points the
+    # user at the keyword.
+    for m in (server_stream, client_stream, bidi)
+        fn = m === client_stream ? noop2 : noop3
+        err = try
+            gRPCServer.handle!(gRPCServer.gRPCRouter(), m, fn)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("allow_unstable_streaming", err.msg)
+        # Opting in registers successfully.
+        @test gRPCServer.handle!(
+            gRPCServer.gRPCRouter(),
+            m,
+            fn;
+            allow_unstable_streaming = true,
+        ) isa gRPCServer.gRPCRouter
+    end
+
+    # The do-block form forwards the keyword.
+    @test gRPCServer.handle!(
+        gRPCServer.gRPCRouter(),
+        bidi;
+        allow_unstable_streaming = true,
+    ) do in, out, ctx
+        nothing
+    end isa gRPCServer.gRPCRouter
+end

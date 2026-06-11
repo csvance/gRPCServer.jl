@@ -23,6 +23,14 @@ function service_cb(io, t::CodeGenerators.ServiceType, ctx::CodeGenerators.Conte
         request_type = _resolve_type_name(rpc.request_type)
         response_type = _resolve_type_name(rpc.response_type)
         method_name = "$(service_name)_$(rpc.name)_Method"
+        is_streaming = rpc.request_stream || rpc.response_stream
+
+        # Streaming RPCs are unstable in gRPCServer v0.1; flag them in the
+        # generated source so the limitation is visible at the call site.
+        is_streaming && println(
+            io,
+            "# !!! WARNING: streaming RPC; unstable in gRPCServer v0.1 (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the Streaming docs.",
+        )
 
         # A builder function mirroring the client's *_Client constructor.
         # TRequest / TResponse default to the generated proto types; override
@@ -36,16 +44,28 @@ function service_cb(io, t::CodeGenerators.ServiceType, ctx::CodeGenerators.Conte
         println(io, "")
     end
 
-    # Per-service registration convenience (the B sugar).
+    # Per-service registration convenience (the B sugar). When the service has
+    # any streaming RPC, the helper takes an `allow_unstable_streaming` keyword
+    # that is forwarded only to the streaming registrations (see handle!).
     register_name = "register_$(service_name)!"
-    kwargs = join(["$(rpc.name)=nothing" for rpc in t.rpcs], ", ")
-    println(io, "function $(register_name)(router; $kwargs)")
+    has_streaming = any(rpc -> rpc.request_stream || rpc.response_stream, t.rpcs)
+    rpc_kwargs = join(["$(rpc.name)=nothing" for rpc in t.rpcs], ", ")
+    signature_kwargs =
+        has_streaming ? "allow_unstable_streaming=false, $rpc_kwargs" : rpc_kwargs
+    println(io, "function $(register_name)(router; $signature_kwargs)")
     for rpc in t.rpcs
         method_name = "$(service_name)_$(rpc.name)_Method"
-        println(
-            io,
-            "\t$(rpc.name) === nothing || gRPCServer.handle!(router, $(method_name)(), $(rpc.name))",
-        )
+        if rpc.request_stream || rpc.response_stream
+            println(
+                io,
+                "\t$(rpc.name) === nothing || gRPCServer.handle!(router, $(method_name)(), $(rpc.name); allow_unstable_streaming=allow_unstable_streaming)",
+            )
+        else
+            println(
+                io,
+                "\t$(rpc.name) === nothing || gRPCServer.handle!(router, $(method_name)(), $(rpc.name))",
+            )
+        end
     end
     println(io, "\treturn router")
     println(io, "end")

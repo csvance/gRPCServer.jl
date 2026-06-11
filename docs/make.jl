@@ -18,6 +18,7 @@ makedocs(;
         "Getting Started" => "getting_started.md",
         "Code Generation" => "code_generation.md",
         "Handlers" => "handlers.md",
+        "Streaming" => "streaming.md",
         "Concurrency" => "concurrency.md",
         "TLS" => "tls.md",
         "Performance" => "performance.md",

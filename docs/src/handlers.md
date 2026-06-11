@@ -17,6 +17,12 @@ signature [`handle!`](@ref) expects:
 | Client streaming | `fn(in::Channel, ctx) -> resp` |
 | Bidirectional | `fn(in::Channel, out::Channel, ctx)` |
 
+!!! danger "Only unary is supported in v0.1"
+    The three streaming patterns are unstable in this release and registering
+    one throws unless you pass `allow_unstable_streaming = true`. See
+    [Streaming](streaming.md) for the known problems before enabling them. The
+    rest of this section applies once streaming is enabled.
+
 For streaming RPCs, you consume requests by iterating the input `Channel` and
 emit responses with `put!(out, msg)`. Closing of the channels and the gRPC
 framing are handled by the library.
@@ -37,8 +43,8 @@ handle!(router, MyService_GetThing_Method()) do req, ctx
     Thing(query(ctx.payload.db, req.id))
 end
 
-# bidirectional
-handle!(router, MyService_Chat_Method()) do in, out, ctx
+# bidirectional (unstable in v0.1: opt in explicitly)
+handle!(router, MyService_Chat_Method(); allow_unstable_streaming = true) do in, out, ctx
     for m in in
         put!(out, reply(m))
     end

@@ -418,6 +418,14 @@ The four forms are:
   - **Client streaming** (stream `req`, `resp`): `fn(in::Channel{TReq}, ctx) -> resp::TResp`
   - **Bidirectional** (stream `req`, stream `resp`): `fn(in::Channel{TReq}, out::Channel{TResp}, ctx)`
 
+!!! danger "Streaming RPCs are unstable in v0.1"
+    Only **unary** RPCs are supported in this release. Registering a
+    server-streaming, client-streaming, or bidirectional handler throws unless
+    you pass `allow_unstable_streaming = true`. Streaming has known HTTP/2
+    lifecycle problems that can leak tasks and connections, report a successful
+    RPC to the client as a transport error, and block graceful shutdown. See the
+    [Streaming](@ref) documentation before enabling it.
+
 `ctx` is the [`gRPCContext`](@ref) carrying request metadata, the deadline, and
 the user `payload`. A handler may `throw` a [`gRPCServiceCallException`](@ref) to
 set the response status; any other exception maps to `GRPC_INTERNAL`.
@@ -433,10 +441,26 @@ end
 Registering against a generated `*_Method` descriptor (or via the generated
 `register_<Service>!` helper) is the usual path; see the Code Generation guide.
 """
+# Streaming RPCs are unstable in v0.1 (see the Streaming docs) and are gated
+# behind an explicit opt-in so a caller cannot reach the known HTTP/2 lifecycle
+# problems by accident. The `allow_unstable_streaming` keyword is accepted by
+# every `handle!` method (ignored for unary) so the do-block form and the
+# generated `register_<Service>!` helper can forward it uniformly.
+const _STREAMING_OPTIN_MESSAGE =
+    "Streaming RPCs are unstable in gRPCServer v0.1 and are not part of the " *
+    "supported public API. They can leak per-stream tasks and connections, " *
+    "report a successful RPC to the client as a transport error, and block " *
+    "graceful shutdown, because of known HTTP/2 lifecycle bugs (see the " *
+    "Streaming section of the documentation). Pass `allow_unstable_streaming = true` " *
+    "to `handle!` to enable them at your own risk."
+
+@noinline _reject_unstable_streaming() = throw(ArgumentError(_STREAMING_OPTIN_MESSAGE))
+
 function handle!(
     router::gRPCRouter,
     m::gRPCMethod{TReq,false,TResp,false},
-    fn,
+    fn;
+    allow_unstable_streaming::Bool = false,  # accepted for a uniform signature; ignored for unary
 ) where {TReq,TResp}
     disp = (stream, ctx) -> _invoke_unary(stream, ctx, m, fn, router)
     router.routes[m.path] = gRPCRouterEntry(m.path, disp)
@@ -447,8 +471,10 @@ end
 function handle!(
     router::gRPCRouter,
     m::gRPCMethod{TReq,false,TResp,true},
-    fn,
+    fn;
+    allow_unstable_streaming::Bool = false,
 ) where {TReq,TResp}
+    allow_unstable_streaming || _reject_unstable_streaming()
     disp = (stream, ctx) -> _invoke_server_stream(stream, ctx, m, fn, router)
     router.routes[m.path] = gRPCRouterEntry(m.path, disp)
     return router
@@ -458,8 +484,10 @@ end
 function handle!(
     router::gRPCRouter,
     m::gRPCMethod{TReq,true,TResp,false},
-    fn,
+    fn;
+    allow_unstable_streaming::Bool = false,
 ) where {TReq,TResp}
+    allow_unstable_streaming || _reject_unstable_streaming()
     disp = (stream, ctx) -> _invoke_client_stream(stream, ctx, m, fn, router)
     router.routes[m.path] = gRPCRouterEntry(m.path, disp)
     return router
@@ -469,12 +497,15 @@ end
 function handle!(
     router::gRPCRouter,
     m::gRPCMethod{TReq,true,TResp,true},
-    fn,
+    fn;
+    allow_unstable_streaming::Bool = false,
 ) where {TReq,TResp}
+    allow_unstable_streaming || _reject_unstable_streaming()
     disp = (stream, ctx) -> _invoke_bidi(stream, ctx, m, fn, router)
     router.routes[m.path] = gRPCRouterEntry(m.path, disp)
     return router
 end
 
-# do-block form: handle!(router, method) do ... end
-handle!(fn::Function, router::gRPCRouter, m::gRPCMethod) = handle!(router, m, fn)
+# do-block form: handle!(router, method; kwargs...) do ... end
+handle!(fn::Function, router::gRPCRouter, m::gRPCMethod; kwargs...) =
+    handle!(router, m, fn; kwargs...)
