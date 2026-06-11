@@ -32,8 +32,9 @@ memory still scales with the number of concurrent streams.
 `max_concurrent_requests` (a [`serve!`](@ref) keyword, `0` = unlimited) caps how
 many RPCs run at once and sheds excess load with `GRPC_RESOURCE_EXHAUSTED`,
 bounding that aggregate exposure. Set it to a value sized to the host's memory
-and the configured `max_receive_message_length`. See
-[Concurrency](concurrency.md#Concurrency-cap-and-load-shedding).
+and the configured `max_receive_message_length`. Production deployments should
+always set an explicit cap; the unlimited default is intended for development.
+See [Concurrency](concurrency.md#Concurrency-cap-and-load-shedding).
 
 ## Connection timeouts
 

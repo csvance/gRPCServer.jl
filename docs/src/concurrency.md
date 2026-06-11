@@ -17,6 +17,12 @@ That per-stream task is where your handler runs:
   messages from the output channel. The handler runs on the original stream
   task.
 
+When the handler finishes, the library closes both channels, joins the drainer
+before the trailers are written (so nothing else can write to the stream), and
+stops the feeder. A handler that returns before the client half-closes is
+handled cleanly: the remaining request messages are abandoned and the read side
+of the stream is cancelled after the response completes.
+
 Because each connection and each stream is independent, many RPCs are served
 concurrently as a matter of course.
 

@@ -126,7 +126,7 @@ const GRPC_CODE_TABLE = Dict{Int64,String}(
 function Base.showerror(io::IO, e::gRPCServiceCallException)
     print(
         io,
-        "gRPCServiceCallException(grpc_status=$(GRPC_CODE_TABLE[e.grpc_status])($(e.grpc_status)), message=\"$(e.message)\")",
+        "gRPCServiceCallException(grpc_status=$(get(GRPC_CODE_TABLE, e.grpc_status, "UNKNOWN_CODE"))($(e.grpc_status)), message=\"$(e.message)\")",
     )
 end
 

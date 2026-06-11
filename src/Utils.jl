@@ -22,15 +22,25 @@ values) and use checked arithmetic so a hostile or absurd value yields a clean
 `INVALID_ARGUMENT` rather than a silently wrapped, garbage deadline.
 """
 function parse_grpc_timeout(value::AbstractString)::Int64
-    isempty(value) && return Int64(0)
-    unit = value[end]
-    digits = @view value[1:end-1]
-    # Spec: TimeoutValue is 1-8 ASCII digits, no sign. `isdigit` admits only
-    # 0-9, so this also rejects '-', '+', and whitespace.
-    (isempty(digits) || length(digits) > 8 || !all(isdigit, digits)) && throw(
-        gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "malformed grpc-timeout: $(_clip(value))"),
-    )
-    num = parse(Int64, digits)  # <= 8 digits always fits in Int64
+    # Operate on raw code units, not string indices: HTTP/2 header values are
+    # arbitrary octets, and indexing a String whose bytes are not valid UTF-8
+    # throws StringIndexError instead of yielding the clean INVALID_ARGUMENT
+    # below. The spec grammar is ASCII-only, so byte-wise parsing is exact.
+    cu = codeunits(value)
+    isempty(cu) && return Int64(0)
+    unit = Char(cu[end])
+    ndigits = length(cu) - 1
+    # Spec: TimeoutValue is 1-8 ASCII digits, no sign; the byte range check
+    # also rejects '-', '+', and whitespace.
+    if ndigits < 1 || ndigits > 8 || !all(b -> UInt8('0') <= b <= UInt8('9'), @view cu[1:ndigits])
+        throw(
+            gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "malformed grpc-timeout: $(_clip(value))"),
+        )
+    end
+    num = Int64(0)
+    for i = 1:ndigits
+        num = num * 10 + Int64(cu[i] - UInt8('0'))  # <= 8 digits always fits in Int64
+    end
     mult = if unit == 'H'
         3_600_000_000_000
     elseif unit == 'M'

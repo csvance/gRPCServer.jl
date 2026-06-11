@@ -157,9 +157,15 @@ function _emit_trailers(stream::HTTP.Stream, ctx::gRPCContext, status::Integer, 
 end
 
 # Trailers-only response (no body): used for unknown methods and pre-handler
-# rejections.
-function _trailers_only(stream::HTTP.Stream, status::Integer, message::AbstractString)
-    HTTP.setstatus(stream, 200)
+# rejections. `http_status` overrides the HTTP-level status for the rejections
+# where the gRPC spec prescribes one (405, 415).
+function _trailers_only(
+    stream::HTTP.Stream,
+    status::Integer,
+    message::AbstractString;
+    http_status::Integer = 200,
+)
+    HTTP.setstatus(stream, http_status)
     HTTP.setheader(stream, "Content-Type", "application/grpc")
     HTTP.startwrite(stream)
     HTTP.addtrailer(stream, "grpc-status" => string(status))
@@ -176,8 +182,13 @@ end
 
 function _finish_error(stream::HTTP.Stream, ctx::gRPCContext, err)
     if err isa gRPCServiceCallException
-        _start_response!(stream, ctx)
-        _emit_trailers(stream, ctx, err.grpc_status, err.message)
+        # Guarded like the branches below: the peer may have reset the stream,
+        # making these writes throw.
+        try
+            _start_response!(stream, ctx)
+            _emit_trailers(stream, ctx, err.grpc_status, err.message)
+        catch
+        end
     elseif _is_cancellation(err)
         @debug "gRPC stream cancelled by peer" path = ctx.path
     elseif deadline_exceeded(ctx)
@@ -215,10 +226,25 @@ function dispatch(
 )
     request = HTTP.startread(stream)
 
+    # gRPC requests are always POST; the spec maps a 405 to INTERNAL on the
+    # client side, so the explicit trailer matches.
+    if request.method != "POST"
+        try
+            _trailers_only(stream, GRPC_INTERNAL, "gRPC requires POST"; http_status = 405)
+        catch
+        end
+        return nothing
+    end
+
     ct = HTTP.header(request.headers, "Content-Type", "")
     if !_is_grpc_content_type(ct)
         try
-            _trailers_only(stream, GRPC_INTERNAL, "invalid content-type: $(_clip(ct))")
+            _trailers_only(
+                stream,
+                GRPC_INTERNAL,
+                "invalid content-type: $(_clip(ct))";
+                http_status = 415,
+            )
         catch
         end
         return nothing

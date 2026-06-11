@@ -183,6 +183,8 @@ function _decode_request(io, ::Type{T}) where {T}
         return _decode_message(io, T)
     catch err
         err isa gRPCServiceCallException && rethrow()
+        # Process-level failures are not client faults; do not relabel them.
+        err isa Union{OutOfMemoryError,StackOverflowError,InterruptException} && rethrow()
         throw(
             gRPCServiceCallException(
                 GRPC_INVALID_ARGUMENT,
@@ -296,10 +298,17 @@ function _reserve!(fr::FrameReader, need::Int)
         fr.r = 0
         fr.w = remaining
     end
-    # Ensure the buffer can hold `need` unconsumed bytes and has tail room to
-    # read into. For a large message this grows `buf` to the message size once.
-    target = max(fr.r + need, fr.w + _FRAME_READ_CHUNK)
-    length(fr.buf) < target && resize!(fr.buf, target)
+    # Grow toward `need` geometrically rather than in one jump: `need` comes
+    # from the attacker-controlled length prefix, and a bare 5-byte header
+    # declaring max_receive_message_length must not force a max-size allocation
+    # before any payload bytes actually arrive. The buffer only reaches the
+    # declared size as real bytes come in; doubling keeps resize cost amortized
+    # O(n) for a large message.
+    full = fr.r + need
+    if length(fr.buf) < full
+        target = min(full, max(fr.w + _FRAME_READ_CHUNK, 2 * length(fr.buf)))
+        resize!(fr.buf, target)
+    end
     return nothing
 end
 
@@ -335,7 +344,8 @@ callers in this package decode immediately, which preserves that invariant.
 function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     if !_ensure!(fr, GRPC_HEADER_SIZE)
         (fr.w - fr.r) == 0 && return nothing
-        throw(gRPCServiceCallException(GRPC_INTERNAL, "stream ended mid-frame (header)"))
+        # A truncated frame is the peer's fault, not a server bug.
+        throw(gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "stream ended mid-frame (header)"))
     end
 
     compressed = fr.buf[fr.r+1] > 0
@@ -363,7 +373,7 @@ function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     len == 0 && return IOBuffer(view(fr.buf, (fr.r+1):fr.r))
 
     if !_ensure!(fr, Int(len))
-        throw(gRPCServiceCallException(GRPC_INTERNAL, "stream ended mid-frame (payload)"))
+        throw(gRPCServiceCallException(GRPC_INVALID_ARGUMENT, "stream ended mid-frame (payload)"))
     end
 
     payload = view(fr.buf, (fr.r+1):(fr.r+Int(len)))

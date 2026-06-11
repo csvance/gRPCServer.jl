@@ -21,6 +21,14 @@ For streaming RPCs, you consume requests by iterating the input `Channel` and
 emit responses with `put!(out, msg)`. Closing of the channels and the gRPC
 framing are handled by the library.
 
+A streaming handler does not have to drain its input channel: returning (or
+throwing) before the client half-closes is a legal completion. The library then
+sends the trailers and abandons the rest of the request stream. Conversely, a
+`put!` on the output channel can throw if the response stream has already
+failed, for example after the peer reset the stream or a response exceeded
+`max_send_message_length`; the thrown exception carries the original failure
+and is mapped to the RPC status, so a handler normally just lets it propagate.
+
 ```julia
 router = gRPCRouter()
 
@@ -79,7 +87,10 @@ The [`gRPCContext`](@ref) passed to every handler carries the user `payload`,
 request metadata, and the deadline.
 
 - [`metadata`](@ref)`(ctx, key, default="")`: read a request metadata header
-- [`set_initial_metadata!`](@ref)`(ctx, key, value)`: queue a response header
+- [`set_initial_metadata!`](@ref)`(ctx, key, value)`: queue a response header.
+  Works in all four RPC shapes; in a streaming handler, call it before the
+  first `put!` on the output channel, since the response head goes out with the
+  first message
 - [`set_trailing_metadata!`](@ref)`(ctx, key, value)`: queue a trailing-metadata header
 - [`deadline_exceeded`](@ref)`(ctx)` / [`iscancelled`](@ref)`(ctx)`: cooperative
   deadline and cancellation checks (see [Concurrency](concurrency.md#Deadlines-and-cancellation))

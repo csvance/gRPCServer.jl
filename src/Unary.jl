@@ -28,6 +28,11 @@ function _invoke_unary(
 end
 
 # Client streaming: fn(in::Channel{TReq}, ctx) -> TResp
+#
+# The feeder task is never joined (see the shutdown protocol note in
+# Streaming.jl): the invoker closes `in` once the handler is done, which stops
+# the feeder, and reads its recorded outcome. A handler may legally return
+# before the client half-closes; the rest of the request stream is abandoned.
 function _invoke_client_stream(
     stream::HTTP.Stream,
     ctx::gRPCContext,
@@ -36,12 +41,18 @@ function _invoke_client_stream(
     router::gRPCRouter,
 ) where {TReq,TResp}
     in = Channel{TReq}(16)
-    feeder = _spawn(sticky = ctx.sticky) do
-        _feed_requests(stream, ctx, in, TReq, router)
+    outcome = _FeederOutcome(nothing)
+    _spawn(sticky = ctx.sticky) do
+        _feed_requests(stream, ctx, in, TReq, router, outcome)
     end
 
-    resp = fn(in, ctx)::TResp
-    _wait_pump(feeder)
+    local resp
+    try
+        resp = fn(in, ctx)::TResp
+    finally
+        close(in)
+    end
+    _check_feeder!(outcome)
 
     _start_response!(stream, ctx)
     out = grpc_encode_message_iobuffer(
