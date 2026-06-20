@@ -99,6 +99,14 @@ end
 function _is_cancellation(err)
     err isa HTTP.ProtocolError && return true
     err isa EOFError && return true
+    # Writing the response to a peer that already closed the stream/connection (deadline cancel,
+    # RST_STREAM, reset, broken pipe) surfaces as an IOError from the socket write. The client is
+    # gone — there is nothing to send, so this is a cancellation, not a server fault to @error.
+    err isa Base.IOError && return true
+    let msg = sprint(showerror, err)
+        (occursin("closed network connection", msg) || occursin("connection reset", msg) ||
+         occursin("broken pipe", msg)) && return true
+    end
     return false
 end
 
