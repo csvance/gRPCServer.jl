@@ -223,12 +223,24 @@ end
         # The handler reads exactly one message and responds while the client
         # keeps the request stream open. Before the review fix the feeder task
         # deadlocked on the full input channel and the admission slot leaked
-        # forever; with max_concurrent_requests=1 the follow-up RPC below would
+        # forever; with max_concurrent_requests=1 the follow-up probe below would
         # then be shed with RESOURCE_EXHAUSTED.
+        #
+        # Assertions are server-side: the handler must complete and the admission
+        # slot must come back. The bundled gRPCClient cannot be used for hard
+        # assertions here: when the server completes a client-streaming RPC before
+        # the client half-closes, the abandoned upload surfaces to libcurl as a
+        # stream CANCEL (so grpc_async_await raises rather than returning) and the
+        # shared handle holds its connection open, so all client interaction is
+        # bounded and best-effort and the slot probe uses the raw h2c client on its
+        # own connection.
         router = gRPCServer.gRPCRouter()
+        handler_returned = Threads.Atomic{Bool}(false)
         gRPCServer.handle!(router, TESTSERVICE_TestClientStreamRPC; allow_unstable_streaming = true) do in, ctx
             first_req = take!(in)
-            TestResponse(UInt64[first_req.test_response_sz])
+            resp = TestResponse(UInt64[first_req.test_response_sz])
+            handler_returned[] = true
+            resp
         end
         gRPCServer.handle!(router, TESTSERVICE_TestRPC) do req, ctx
             TestResponse(collect(UInt64, 1:req.test_response_sz))
@@ -245,14 +257,23 @@ end
             put!(request_c, TestRequest(1, UInt64[]))
             put!(request_c, TestRequest(1, UInt64[]))
             close(request_c)
-            resp = gRPCClient.grpc_async_await(client, req)
-            @test resp.data == UInt64[42]
 
-            # The admission slot must be free again.
-            u = TestService_TestRPC_Client("127.0.0.1", port)
-            @test length(gRPCClient.grpc_sync_request(u, TestRequest(3, UInt64[])).data) == 3
+            @test _await_flag(handler_returned, 10)
+
+            # The RPC completed server-side, so its admission slot must be free.
+            @test _probe_unary(port, 10) == string(GRPC_OK)
+
+            # Best-effort client view of the early completion; not required.
+            (got, val) = _bounded(5) do
+                gRPCClient.grpc_async_await(client, req)
+            end
+            if got && val isa TestResponse
+                @test val.data == UInt64[42]
+            end
         finally
-            close(server)
+            # forceclose: the abandoned client may still hold its connection
+            # open, and a graceful close would wait for it.
+            HTTP.forceclose(server)
         end
     end
 
