@@ -20,6 +20,11 @@ Keyword arguments:
   cap is reached, further requests are shed immediately with
   `RESOURCE_EXHAUSTED` rather than queued, so a flood cannot exhaust memory or
   task slots. `0` (default) disables the cap.
+- `inflight`, `shed_total`: optional shared atomic counters for observability. The
+  server increments `inflight` for the duration of each admitted RPC (when the cap
+  is enabled) and increments `shed_total` once per request rejected at the cap. Pass
+  your own atomics to read them live from a metrics endpoint while the server runs;
+  the defaults are fresh per-call counters.
 - `read_header_timeout`, `idle_timeout`, `read_timeout`, `write_timeout`
   (seconds): connection deadlines forwarded to `HTTP.listen!`. `read_header_timeout`
   (default 30s) and `idle_timeout` (default 300s) bound slow-header and idle
@@ -47,6 +52,8 @@ function serve!(
     alpn_protocols::Vector{String} = ["h2"],
     sticky::Bool = false,
     max_concurrent_requests::Integer = 0,
+    inflight::Threads.Atomic{Int} = Threads.Atomic{Int}(0),
+    shed_total::Threads.Atomic{Int} = Threads.Atomic{Int}(0),
     read_header_timeout = 30,
     idle_timeout = 300,
     read_timeout = nothing,
@@ -57,9 +64,8 @@ function serve!(
     h2_initial_window_size::Integer = 65535,
     h2_connection_window_size::Integer = 65535,
 )
-    inflight = Threads.Atomic{Int}(0)
     limit = Int(max_concurrent_requests)
-    handler = stream -> dispatch(router, stream, context, sticky, limit, inflight)
+    handler = stream -> dispatch(router, stream, context, sticky, limit, inflight, shed_total)
 
     if tls
         (cert_file === nothing || key_file === nothing) &&
@@ -209,12 +215,12 @@ function _finish_error(stream::HTTP.Stream, ctx::gRPCContext, err)
 end
 
 """
-    dispatch(router, stream, payload, sticky, max_concurrent, inflight)
+    dispatch(router, stream, payload, sticky, max_concurrent, inflight, shed_total)
 
 Handle one inbound HTTP/2 stream: validate, route, apply the concurrency cap,
 build the context, invoke the handler, and emit the closing gRPC trailers.
 `max_concurrent` (0 = unlimited) and the shared `inflight` counter implement
-load shedding.
+load shedding; `shed_total` is incremented once per request rejected at the cap.
 """
 function dispatch(
     router::gRPCRouter,
@@ -223,6 +229,7 @@ function dispatch(
     sticky::Bool,
     max_concurrent::Int,
     inflight::Threads.Atomic{Int},
+    shed_total::Threads.Atomic{Int},
 )
     request = HTTP.startread(stream)
 
@@ -266,6 +273,7 @@ function dispatch(
     if max_concurrent > 0
         if Threads.atomic_add!(inflight, 1) >= max_concurrent
             Threads.atomic_sub!(inflight, 1)
+            Threads.atomic_add!(shed_total, 1)
             try
                 _trailers_only(stream, GRPC_RESOURCE_EXHAUSTED, "server at capacity")
             catch
