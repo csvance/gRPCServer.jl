@@ -402,6 +402,21 @@ end
 # Registration
 # ---------------------------------------------------------------------------
 
+# Streaming RPCs are unstable in v0.1 (see the Streaming docs) and are gated
+# behind an explicit opt-in so a caller cannot reach the known HTTP/2 lifecycle
+# problems by accident. The `allow_unstable_streaming` keyword is accepted by
+# every `handle!` method (ignored for unary) so the do-block form and the
+# generated `register_<Service>!` helper can forward it uniformly.
+const _STREAMING_OPTIN_MESSAGE =
+    "Streaming RPCs are unstable in gRPCServer v0.1 and are not part of the " *
+    "supported public API. They can leak per-stream tasks and connections, " *
+    "report a successful RPC to the client as a transport error, and block " *
+    "graceful shutdown, because of known HTTP/2 lifecycle bugs (see the " *
+    "Streaming section of the documentation). Pass `allow_unstable_streaming = true` " *
+    "to `handle!` to enable them at your own risk."
+
+@noinline _reject_unstable_streaming() = throw(ArgumentError(_STREAMING_OPTIN_MESSAGE))
+
 """
     handle!(router::gRPCRouter, m::gRPCMethod, fn) -> router
     handle!(fn, router::gRPCRouter, m::gRPCMethod) -> router
@@ -441,21 +456,6 @@ end
 Registering against a generated `*_Method` descriptor (or via the generated
 `register_<Service>!` helper) is the usual path; see the Code Generation guide.
 """
-# Streaming RPCs are unstable in v0.1 (see the Streaming docs) and are gated
-# behind an explicit opt-in so a caller cannot reach the known HTTP/2 lifecycle
-# problems by accident. The `allow_unstable_streaming` keyword is accepted by
-# every `handle!` method (ignored for unary) so the do-block form and the
-# generated `register_<Service>!` helper can forward it uniformly.
-const _STREAMING_OPTIN_MESSAGE =
-    "Streaming RPCs are unstable in gRPCServer v0.1 and are not part of the " *
-    "supported public API. They can leak per-stream tasks and connections, " *
-    "report a successful RPC to the client as a transport error, and block " *
-    "graceful shutdown, because of known HTTP/2 lifecycle bugs (see the " *
-    "Streaming section of the documentation). Pass `allow_unstable_streaming = true` " *
-    "to `handle!` to enable them at your own risk."
-
-@noinline _reject_unstable_streaming() = throw(ArgumentError(_STREAMING_OPTIN_MESSAGE))
-
 function handle!(
     router::gRPCRouter,
     m::gRPCMethod{TReq,false,TResp,false},
