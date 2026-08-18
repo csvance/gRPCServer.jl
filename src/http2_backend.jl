@@ -59,8 +59,12 @@ function _assert_purehttp2_capable()
     if ext === nothing
         throw(ArgumentError(
             "PureHTTP2Backend requires the optional PureHTTP2.jl dependency. " *
-            "Run `using PureHTTP2` before constructing it (adding it to your " *
-            "project if needed), or select HTTPjlBackend()."))
+            "Run `import PureHTTP2` before constructing it (adding it to your " *
+            "project if needed), or select HTTPjlBackend(). " *
+            "Prefer `import` over `using`: both load the extension, but " *
+            "`using PureHTTP2` alongside `using gRPCServer` makes " *
+            "`get_metadata` and `set_header!` ambiguous, since both packages " *
+            "export those names."))
     end
     return nothing
 end

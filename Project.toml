@@ -33,6 +33,7 @@ Nghttp2Wrapper = "0.3"
 PrecompileTools = "1"
 ProtoBuf = "^1.2.2"
 PureHTTP2 = "0.5"
+Random = "1"
 Reseau = "1"
 TranscodingStreams = "0.9, 0.11"
 gRPCClient = "1"
@@ -42,7 +43,8 @@ julia = "1.10"
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 PureHTTP2 = "7d1e1b98-28e7-4969-8df9-5a308937986a"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Aqua", "JSON", "PureHTTP2", "Test"]
+test = ["Aqua", "JSON", "PureHTTP2", "Random", "Test"]

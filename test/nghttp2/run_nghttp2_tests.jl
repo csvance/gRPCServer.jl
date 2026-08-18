@@ -59,9 +59,10 @@ include(joinpath(GRPCCLIENT_DIR, "remote_harness.jl"))
         # HTTP.jl listener timeouts are not applicable to this backend.
         @test_throws UnsupportedFeatureError GRPCServerNghttp2(
             "127.0.0.1", 50212; read_timeout=5.0)
-        # Receive cap is not enforced.
-        @test_throws UnsupportedFeatureError GRPCServerNghttp2(
-            "127.0.0.1", 50213; max_receive_message_length=8 * 1024 * 1024)
+        # The receive cap IS enforced now (read_message! refuses an over-cap
+        # length prefix), so this keyword is honoured rather than rejected.
+        @test GRPCServerNghttp2(
+            "127.0.0.1", 50213; max_receive_message_length=8 * 1024 * 1024) isa GRPCServer
         # Default-config construction works; basic TLS (cert/key) works;
         # enable_health_check is allowed (Check works; Watch refused per-request).
         @test GRPCServerNghttp2("127.0.0.1", 50214) isa GRPCServer
@@ -219,6 +220,96 @@ end
         nghttp2_session_del(session)
         close(cb)
         try; close(sock); catch; end
+    end
+end
+
+# --- Security: receive path (SEC_ROADMAP phase 2, Nghttp2Backend) -----------
+#
+# These live here rather than in test/security/ because Nghttp2Wrapper cannot
+# join the default test environment (see the header note). They mirror the
+# receive-path assertions the other two backends get in
+# test/security/test_framing_adversarial.jl.
+#
+# Both defects covered here were real: `read_message!` had no size cap at all,
+# and it read the compression flag and then ignored it, handing the handler
+# still-compressed bytes that the protobuf decoder parsed as if they were the
+# request — a silently wrong result rather than an error.
+
+@testset "Security: Nghttp2 receive path" begin
+    NExt = Base.get_extension(gRPCServer, :gRPCServerNghttp2Ext)
+    @test NExt !== nothing
+
+    _frame(payload; compressed = false) =
+        vcat(UInt8[compressed ? 0x01 : 0x00],
+             reinterpret(UInt8, [hton(UInt32(length(payload)))]), payload)
+
+    function _stream(body; encoding = "gzip", cap = 4 * 1024 * 1024)
+        headers = Nghttp2Wrapper.NVPair[
+            Nghttp2Wrapper.NVPair("content-type", "application/grpc")]
+        encoding === nothing ||
+            push!(headers, Nghttp2Wrapper.NVPair("grpc-encoding", encoding))
+        req = Nghttp2Wrapper.ServerRequest("POST", "/t/M", headers, body, Int32(1))
+        return NExt.Nghttp2GRPCStream(req, cap)
+    end
+
+    _err(f) = try
+        f()
+        nothing
+    catch e
+        e
+    end
+
+    @testset "Over-cap message is refused" begin
+        # 8 MiB against the 4 MiB default.
+        err = _err(() -> gRPCServer.read_message!(
+            _stream(_frame(rand(UInt8, 8 * 1024 * 1024)))))
+        @test err isa gRPCServer.GRPCError
+        @test err.code == gRPCServer.StatusCode.RESOURCE_EXHAUSTED
+    end
+
+    @testset "Message under the cap still passes" begin
+        payload = rand(UInt8, 1024)
+        msg = gRPCServer.read_message!(_stream(_frame(payload)))
+        @test msg !== nothing
+        @test read(msg) == payload
+    end
+
+    @testset "Compressed frames are decompressed, not passed through" begin
+        original = Vector{UInt8}("hello gRPC compressed")
+        comp = gRPCServer.compress(original, gRPCServer.CompressionCodec.GZIP)
+        got = read(gRPCServer.read_message!(_stream(_frame(comp; compressed = true))))
+        @test got == original
+        @test got != comp        # the defect this pins
+    end
+
+    @testset "Compressed frame with no usable codec is UNIMPLEMENTED" begin
+        comp = gRPCServer.compress(Vector{UInt8}("x"), gRPCServer.CompressionCodec.GZIP)
+        for encoding in (nothing, "br")
+            err = _err(() -> gRPCServer.read_message!(
+                _stream(_frame(comp; compressed = true); encoding = encoding)))
+            @test err isa gRPCServer.GRPCError
+            @test err.code == gRPCServer.StatusCode.UNIMPLEMENTED
+        end
+    end
+
+    @testset "Decompression bomb is refused" begin
+        bomb = gRPCServer.compress(zeros(UInt8, 32 * 1024 * 1024),
+                                   gRPCServer.CompressionCodec.GZIP)
+        cap = 1024 * 1024
+        @test length(bomb) < cap          # clears the length-prefix check
+        err = _err(() -> gRPCServer.read_message!(
+            _stream(_frame(bomb; compressed = true); cap = cap)))
+        @test err isa gRPCServer.GRPCError
+        @test err.code == gRPCServer.StatusCode.RESOURCE_EXHAUSTED
+    end
+
+    @testset "Capabilities report what the backend now does" begin
+        caps = gRPCServer.backend_capabilities(Nghttp2Backend)
+        @test caps.receive_cap
+        @test caps.decompression
+        # max_receive_message_length is honoured, so it must no longer raise.
+        @test GRPCServer("127.0.0.1", 50051; http2_backend = Nghttp2Backend(),
+                         max_receive_message_length = 1024 * 1024) isa GRPCServer
     end
 end
 

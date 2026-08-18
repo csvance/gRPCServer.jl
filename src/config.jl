@@ -115,9 +115,16 @@ Configuration container for gRPC server options.
 ## Message Limits
 - `max_message_size::Int`: Maximum message size in bytes (default: 4MB). Seeds both the receive
   and send caps; override one side with `max_receive_message_length` / `max_send_message_length`
-  (each defaults to `max_message_size`). The receive cap is enforced by the framing layer on
-  incoming request messages (HTTPjl backend); the send cap is enforced when encoding response
-  messages. The `ServerConfig.max_message_size` field always reports the larger of the two.
+  (each defaults to `max_message_size`). The receive cap is enforced on incoming request
+  messages by the framing layer (`HTTPjlBackend`) and by the read path of the PureHTTP2
+  extension; the send cap is enforced when encoding response messages. The
+  `ServerConfig.max_message_size` field always reports the larger of the two.
+
+  !!! warning
+      `Nghttp2Backend` enforces **no** receive cap. Since `max_message_size` seeds
+      `max_receive_message_length` without being capability-gated, setting it there is
+      accepted and reported back by `ServerConfig` while nothing enforces it. Treat that
+      backend as unsuitable for untrusted peers.
 
 ## Timeouts (in seconds)
 - `keepalive_interval::Union{Float64, Nothing}`: Interval for keepalive pings (nothing = disabled)

@@ -24,6 +24,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 
+# Least privilege for the automatic GITHUB_TOKEN. Without this block the
+# workflow inherits the repository default, which on many repos is still
+# read-write on `contents` — far more than a test run needs. Declared at the
+# top level so every job inherits it (CompatHelper.yml and TagBot.yml already
+# scope their own).
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}

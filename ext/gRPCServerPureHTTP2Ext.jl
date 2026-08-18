@@ -31,11 +31,17 @@ struct PureHTTP2GRPCStream <: gRPCServer.AbstractGRPCStream
     io::IO
     stream::PureHTTP2.HTTP2Stream
     wlock::ReentrantLock   # serializes writes to `io` across dispatch tasks
+    # Receive-side size cap, carried per stream so the read path can enforce it
+    # without reaching back to the server. Seeded from
+    # `ServerConfig.max_receive_message_length` at dispatch.
+    max_receive_message_length::Int64
 end
 
 PureHTTP2GRPCStream(conn::PureHTTP2.HTTP2Connection, io::IO,
-                    stream::PureHTTP2.HTTP2Stream) =
-    PureHTTP2GRPCStream(conn, io, stream, ReentrantLock())
+                    stream::PureHTTP2.HTTP2Stream,
+                    max_receive_message_length::Integer = 4 * 1024 * 1024) =
+    PureHTTP2GRPCStream(conn, io, stream, ReentrantLock(),
+                        Int64(max_receive_message_length))
 
 # --- Request side ---
 
@@ -117,8 +123,9 @@ function read_message!(s::PureHTTP2GRPCStream)
     waited = 0
     while true
         outcome = lock(s.conn.lock) do
-            if has_complete_grpc_message(s.stream)
-                return (:msg, read_grpc_message!(s.conn, s.stream))
+            if has_complete_grpc_message(s.stream, s.max_receive_message_length)
+                return (:msg, read_grpc_message!(s.conn, s.stream,
+                                                 s.max_receive_message_length))
             elseif s.stream.end_stream_received
                 return (:end,)
             elseif s.stream.reset || s.stream.state == StreamState.CLOSED
@@ -205,7 +212,8 @@ function write_frames(io::IO, frames::Vector{Frame})
     flush(io)
 end
 
-function has_complete_grpc_message(stream::HTTP2Stream)::Bool
+function has_complete_grpc_message(stream::HTTP2Stream,
+                                   max_receive_message_length::Integer = 4 * 1024 * 1024)::Bool
     data = peek_data(stream)
     if length(data) < 5
         return false
@@ -214,6 +222,14 @@ function has_complete_grpc_message(stream::HTTP2Stream)::Bool
     # Parse message length (big-endian)
     msg_len = (UInt32(data[2]) << 24) | (UInt32(data[3]) << 16) |
               (UInt32(data[4]) << 8) | UInt32(data[5])
+
+    # An over-cap length prefix counts as "ready" so the stream is dispatched
+    # immediately and `read_grpc_message!` raises RESOURCE_EXHAUSTED. Waiting
+    # for the full declared payload instead would let a peer pin buffer memory
+    # by announcing a size the server has already decided to refuse.
+    if msg_len > max_receive_message_length
+        return true
+    end
 
     # Check if we have the full message
     return length(data) >= 5 + msg_len
@@ -227,7 +243,8 @@ get_response_content_type(stream::HTTP2Stream)::String =
         [(n, v) for (n, v) in stream.request_headers if !startswith(n, ":")])
 
 function read_grpc_message!(conn::HTTP2Connection,
-                            stream::HTTP2Stream)::Union{Vector{UInt8}, Nothing}
+                            stream::HTTP2Stream,
+                            max_receive_message_length::Integer = 4 * 1024 * 1024)::Union{Vector{UInt8}, Nothing}
     # Caller holds `conn.lock`.
     data = take!(stream.data_buffer)
     if length(data) < 5
@@ -240,6 +257,16 @@ function read_grpc_message!(conn::HTTP2Connection,
     compressed = data[1] != 0x00
     msg_len = (UInt32(data[2]) << 24) | (UInt32(data[3]) << 16) |
               (UInt32(data[4]) << 8) | UInt32(data[5])
+
+    # Refuse an over-cap length prefix before buffering or copying the payload,
+    # mirroring the HTTPjl framing path (src/framing.jl). The buffer is left
+    # drained: the stream is failed, not resumed.
+    if msg_len > max_receive_message_length
+        throw(gRPCServer.GRPCError(
+            gRPCServer.StatusCode.RESOURCE_EXHAUSTED,
+            "length-prefix longer than max_receive_message_length: $(msg_len) > $(max_receive_message_length)",
+        ))
+    end
 
     total_msg_size = 5 + Int(msg_len)
     if length(data) < total_msg_size
@@ -256,21 +283,31 @@ function read_grpc_message!(conn::HTTP2Connection,
         write(stream.data_buffer, data[(total_msg_size + 1):end])
     end
 
-    # Handle decompression if compressed flag is set
+    # Handle decompression if compressed flag is set.
+    #
+    # Delegates to gRPCServer's `_decompress_frame`, the same incremental,
+    # output-capped decompressor the HTTPjl framing path uses, rather than the
+    # unbounded `decompress`. A small highly-redundant payload expands ~1000:1
+    # under gzip, so an uncapped decompress here is a compression bomb: the cap
+    # is what makes the compressed flag safe to honour.
+    #
+    # A compressed frame with no usable codec is a protocol violation
+    # (UNIMPLEMENTED), matching src/framing.jl. Previously both this and a
+    # decompression failure only logged a warning and handed the still-compressed
+    # bytes to the handler, which then decoded garbage as if it were the request.
     if compressed
         encoding = get_grpc_encoding(stream)
-        if encoding !== nothing
-            codec = parse_codec(encoding)
-            if codec !== nothing && codec != CompressionCodec.IDENTITY
-                try
-                    message = decompress(message, codec)
-                catch e
-                    @warn "Failed to decompress gRPC message" encoding=encoding exception=e
-                    # Return compressed data if decompression fails
-                end
-            end
-        else
-            @warn "Compressed flag set but no grpc-encoding header"
+        codec = encoding === nothing ? nothing : parse_codec(encoding)
+        if codec === nothing
+            throw(gRPCServer.GRPCError(
+                gRPCServer.StatusCode.UNIMPLEMENTED,
+                encoding === nothing ?
+                    "Request was compressed but no grpc-encoding header was provided." :
+                    "Request was compressed with an unsupported grpc-encoding.",
+            ))
+        elseif codec != CompressionCodec.IDENTITY
+            message = gRPCServer._decompress_frame(
+                message, codec, Int64(max_receive_message_length))
         end
     end
 
@@ -516,7 +553,8 @@ function dispatch_ready_streams!(handle::PureHTTP2ServeHandle, conn::HTTP2Connec
         for (stream_id, stream) in conn.streams
             if stream.headers_complete && !stream.reset
                 # Check if we have a complete gRPC message or END_STREAM
-                if stream.end_stream_received || has_complete_grpc_message(stream)
+                if stream.end_stream_received ||
+                   has_complete_grpc_message(stream, server.config.max_receive_message_length)
                     push!(streams_to_process, stream_id)
                 end
             end
@@ -560,7 +598,8 @@ function _dispatch_stream(handle::PureHTTP2ServeHandle, conn::HTTP2Connection,
     server = handle.server
     @debug "dispatch task begin" id=stream.id
     try
-        gs = PureHTTP2GRPCStream(conn, io, stream)
+        gs = PureHTTP2GRPCStream(conn, io, stream,
+                                 server.config.max_receive_message_length)
         server.config.log_requests && @info "gRPC request" method=get_path(stream) peer=peer
         @debug "dispatch task on_call" id=stream.id
         handle.on_call === nothing || handle.on_call(gs, peer)

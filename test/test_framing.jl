@@ -141,4 +141,17 @@
         @test got == body
         @test got !== body  # fresh copy, not a view into reader storage
     end
+    @testset "_decompress_frame cap arithmetic does not overflow" begin
+        # `_decompress_frame` reads `maxlen + 1` bytes to detect an over-cap
+        # payload. A maxlen at the top of the Int64 range overflowed that sum to
+        # a negative read count, and the function returned an EMPTY message
+        # instead of the decompressed one — silent data loss rather than an error.
+        original = Vector{UInt8}("a message that must survive a very large cap")
+        comp = gRPCServer.compress(original, gRPCServer.CompressionCodec.GZIP)
+        for maxlen in (Int64(4 * 1024 * 1024), typemax(Int64) - 1, typemax(Int64))
+            @test gRPCServer._decompress_frame(
+                comp, gRPCServer.CompressionCodec.GZIP, maxlen) == original
+        end
+    end
+
 end

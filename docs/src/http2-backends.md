@@ -25,7 +25,7 @@ server = GRPCServer("127.0.0.1", 50051)
 
 # Opt in to the PureHTTP2 backend (optional dependency: load PureHTTP2 first,
 # which also loads the gRPCServerPureHTTP2Ext extension)
-using PureHTTP2
+import PureHTTP2
 server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 ```
 
@@ -92,7 +92,7 @@ see the note below). Footnote markers qualify partial or nuanced support.
 | mTLS (`client_ca`, `require_client_cert`) | ✅ | ✅ | ❌ |
 | `min_version`, `alpn_protocols`, `handshake_timeout_ns` | ✅ | ✅ | ❌ |
 | `reload_tls!` | ❌ | ✅ | ❌ |
-| `max_receive_message_length` | ✅ | ❌ | ❌ |
+| `max_receive_message_length` | ✅ | ✅ | ✅² |
 | `max_send_message_length`, `max_concurrent_requests` | ✅ | ✅ | ✅ |
 | `max_connections`, `max_queued_requests`, `keepalive_interval`, `keepalive_timeout` | ❌ | ❌ | ❌ |
 | `max_concurrent_streams` | ✅¹ | ❌ | ❌ |
@@ -109,17 +109,32 @@ see the note below). Footnote markers qualify partial or nuanced support.
 
 ¹ Enforced per connection on HTTPjl (default 100).
 ² Pass `stop!(; timeout=)` on HTTPjl instead; the config keyword raises.
-³ Strict on HTTPjl, lenient on PureHTTP2; nghttp2 performs no decompression
-   (raw bytes, `decompression=false`).
+³ Strict on all three backends: a compressed frame whose codec was not
+   negotiated is refused (`UNIMPLEMENTED`), and decompression output is capped at
+   `max_receive_message_length`, so a compression bomb cannot force an unbounded
+   allocation.
 ⁴ `ServerReflectionInfo` is a bidi stream, which nghttp2 refuses, so the
    keyword raises.
 ⁵ `Check` works on nghttp2; `Watch` is refused per request.
 
 RPC-type rows (server-/bidi-streaming on `Nghttp2Backend`) are method-level
 refusals (`UNIMPLEMENTED`), not construction errors, so they do not raise.
-`max_message_size` is never gated: it seeds both directions, the send cap is
-enforced on every backend, and the receive cap is gated via the explicit
-`max_receive_message_length` keyword.
+`max_message_size` is never gated: it seeds both directions, and the send cap
+is enforced on every backend.
+
+!!! warning "The receive cap bounds different things per backend"
+    ² All three backends enforce `max_receive_message_length` and refuse an
+    over-cap message with `RESOURCE_EXHAUSTED`, but not at the same point.
+
+    On `HTTPjlBackend` and `PureHTTP2Backend` the length prefix is refused
+    **before the payload is read**, so the cap bounds what the server
+    *allocates*. `Nghttp2Backend` cannot do that: Nghttp2Wrapper's handler is
+    **buffered**, so the whole request body is already in memory by the time the
+    cap is consulted. There it bounds what the server *processes*.
+
+    Bounding the allocation would need a body-size limit in Nghttp2Wrapper, which
+    it does not currently offer. That is why `Nghttp2Backend` remains unsuitable
+    for untrusted peers even with the cap enforced.
 
 ## The nghttp2 Backend
 

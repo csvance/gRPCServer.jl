@@ -341,15 +341,78 @@ function create_context_from_headers(
     )
 end
 
+# --- Response-metadata validation -------------------------------------------
+#
+# Handler-supplied header/trailer names and values are emitted onto the wire, so
+# they are validated at this choke point (every backend formats its response
+# metadata through the two functions below). Without it a handler that echoes
+# client-controlled data into a header could:
+#
+#   * emit a second `grpc-status` trailer, since the runtime's own value is
+#     pushed first and the handler's is appended — a client that reads the last
+#     occurrence sees the handler's, turning a PERMISSION_DENIED into an OK;
+#   * emit a pseudo-header such as `:path` after the regular fields, which HTTP/2
+#     forbids in a response and requires a peer to treat as malformed;
+#   * put CR, LF or NUL in a value, which RFC 9113 §8.2.1 forbids outright and
+#     which becomes response splitting across an HTTP/2 -> HTTP/1.1 downgrade.
+#
+# Offending entries are dropped and logged rather than raising: this runs on the
+# response path, including the error path, where throwing would replace a real
+# status with an INTERNAL and lose the original failure.
+
+# Names the runtime owns. A handler that sets these is either mistaken or
+# attempting to override the status the dispatcher determined.
+const _RESERVED_RESPONSE_KEYS = Set([
+    "grpc-status", "grpc-message", "grpc-status-details-bin",
+    "content-type", "grpc-encoding", "grpc-accept-encoding",
+])
+
+# gRPC metadata keys are ASCII lowercase letters, digits, and `-`, `_`, `.`
+# (names are lowercased on the way in by set_header!/set_trailer!).
+function _valid_metadata_key(key::AbstractString)::Bool
+    isempty(key) && return false
+    startswith(key, ":") && return false          # pseudo-header
+    for c in key
+        (('a' <= c <= 'z') || ('0' <= c <= '9') || c == '-' || c == '_' || c == '.') || return false
+    end
+    return true
+end
+
+# RFC 9113 §8.2.1: a field value must not contain CR, LF or NUL. Base64-encoded
+# `-bin` values can never trip this, so only text values are checked.
+_valid_metadata_value(v::AbstractString)::Bool =
+    !any(c -> c == '\r' || c == '\n' || c == '\0', v)
+
+function _accept_response_metadata(kind::String, key::AbstractString, value)::Bool
+    if key in _RESERVED_RESPONSE_KEYS
+        @warn "Dropping reserved $kind set by handler" key=key
+        return false
+    end
+    if !_valid_metadata_key(key)
+        @warn "Dropping $kind with invalid name" key=key
+        return false
+    end
+    if value isa AbstractString && !_valid_metadata_value(value)
+        @warn "Dropping $kind with forbidden byte in value (CR, LF or NUL)" key=key
+        return false
+    end
+    return true
+end
+
 """
     get_response_headers(ctx::ServerContext) -> Vector{Tuple{String, String}}
 
 Get response headers formatted for HTTP/2.
+
+Handler-set names and values are validated first: reserved names, pseudo-headers,
+names outside the gRPC metadata charset, and values containing CR, LF or NUL are
+dropped with a warning rather than emitted.
 """
 function get_response_headers(ctx::ServerContext)::Vector{Tuple{String, String}}
     headers = Tuple{String, String}[]
 
     for (key, value) in ctx.response_headers
+        _accept_response_metadata("response header", key, value) || continue
         if value isa Vector{UInt8}
             # Binary header - base64 encode
             push!(headers, (key, base64encode(value)))
@@ -365,6 +428,11 @@ end
     get_response_trailers(ctx::ServerContext, status::Int, message::String) -> Vector{Tuple{String, String}}
 
 Get response trailers formatted for HTTP/2, including gRPC status.
+
+The runtime's own `grpc-status` / `grpc-message` are emitted first, then the
+handler's trailers — validated as in [`get_response_headers`](@ref). In
+particular a handler cannot append a second `grpc-status`, which would let a
+client reading the last occurrence see a status the dispatcher never returned.
 """
 function get_response_trailers(ctx::ServerContext, status::Int, message::String)::Vector{Tuple{String, String}}
     trailers = Tuple{String, String}[
@@ -378,6 +446,7 @@ function get_response_trailers(ctx::ServerContext, status::Int, message::String)
     end
 
     for (key, value) in ctx.trailers
+        _accept_response_metadata("trailer", key, value) || continue
         if value isa Vector{UInt8}
             push!(trailers, (key, base64encode(value)))
         else
@@ -388,19 +457,15 @@ function get_response_trailers(ctx::ServerContext, status::Int, message::String)
     return trailers
 end
 
-# Simple URL encoding for grpc-message
-function HTTP_urlencode(s::String)::String
-    result = IOBuffer()
-    for c in s
-        if c in ('a':'z'..., 'A':'Z'..., '0':'9'..., '-', '_', '.', '~')
-            write(result, c)
-        else
-            write(result, '%')
-            write(result, uppercase(string(UInt8(c), base=16, pad=2)))
-        end
-    end
-    return String(take!(result))
-end
+# NOTE: a second grpc-message encoder (`HTTP_urlencode`) used to live here. It
+# was never called — `get_response_trailers` above uses `percent_encode`
+# (src/strict.jl) — and it was wrong in two ways: it iterated over `Char` and
+# applied `UInt8(c)`, so it emitted the truncated code point instead of the
+# UTF-8 bytes ("café" -> "caf%E9" rather than "caf%C3%A9") and threw
+# `InexactError` on any code point above U+00FF. Having a plausible-looking,
+# tested-but-unused variant of a security-relevant encoder next to the real one
+# is how the wrong one eventually gets wired in, so it was removed rather than
+# fixed. `percent_encode` is the single implementation.
 
 function Base.show(io::IO, ctx::ServerContext)
     print(io, "ServerContext(id=$(ctx.request_id), method=\"$(ctx.method)\"")

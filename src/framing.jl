@@ -260,6 +260,12 @@ end
 # force a huge allocation. Returns a fresh `Vector{UInt8}`. Decompression
 # failure (corrupt/truncated data) surfaces as `GRPCError(INTERNAL)`.
 function _decompress_frame(payload::AbstractVector{UInt8}, codec::CompressionCodec.T, maxlen::Int64)::Vector{UInt8}
+    # The loop below reads `maxlen + 1` bytes to detect an over-cap payload, so
+    # a `maxlen` at the top of the Int64 range would overflow that sum to a
+    # negative read count and silently yield an EMPTY message instead of the
+    # decompressed one. Clamp so the +1 is always representable; the clamped
+    # value is far beyond any real message cap, so honest traffic is unaffected.
+    maxlen = min(maxlen, typemax(Int64) - 1)
     decompressor = codec == CompressionCodec.GZIP ? GzipDecompressor() : DeflateDecompressor()
     stream = TranscodingStreams.TranscodingStream(decompressor, IOBuffer(payload))
     out = IOBuffer()

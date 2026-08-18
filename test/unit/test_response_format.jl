@@ -120,26 +120,37 @@ using .ConformanceData
 
     @testset "T018: grpc-message encoding" begin
 
-        @testset "URL encoding function exists" begin
-            @test isdefined(gRPCServer, :HTTP_urlencode)
+        # `percent_encode` (src/strict.jl) is the ONE grpc-message encoder. A
+        # second, unused, byte-incorrect variant (`HTTP_urlencode`) used to sit
+        # in src/context.jl and was pinned by these tests; it was removed. The
+        # cases below include the two it got wrong, so a reintroduction fails
+        # here rather than on the wire.
+
+        @testset "Encoding function exists" begin
+            @test isdefined(gRPCServer, :percent_encode)
         end
 
-        @testset "URL encode ASCII text" begin
-            encoded = gRPCServer.HTTP_urlencode("Hello World")
-            @test encoded == "Hello%20World"
+        @testset "Printable ASCII passes through unescaped" begin
+            # Per the gRPC spec the escaped set is bytes outside 0x20..0x7E plus
+            # '%' — NOT the RFC 3986 unreserved set. Spaces and ':' stay literal.
+            @test gRPCServer.percent_encode("Hello World") == "Hello World"
+            @test gRPCServer.percent_encode("Test: value=123") == "Test: value=123"
+            @test gRPCServer.percent_encode("abcABC123-._~") == "abcABC123-._~"
         end
 
-        @testset "URL encode special characters" begin
-            encoded = gRPCServer.HTTP_urlencode("Test: value=123")
-            @test occursin("%3A", encoded)  # :
-            @test occursin("%3D", encoded)  # =
+        @testset "Control bytes and percent are escaped" begin
+            @test gRPCServer.percent_encode("a\nb") == "a%0Ab"
+            @test gRPCServer.percent_encode("tab\there") == "tab%09here"
+            @test gRPCServer.percent_encode("100%") == "100%25"
         end
 
-        @testset "URL encode preserves safe characters" begin
-            # Per RFC 3986: unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"
-            safe = "abcABC123-._~"
-            encoded = gRPCServer.HTTP_urlencode(safe)
-            @test encoded == safe
+        @testset "Non-ASCII is escaped as UTF-8 bytes" begin
+            # The removed encoder produced "caf%E9" here (truncated code point)
+            # and threw InexactError on anything above U+00FF.
+            @test gRPCServer.percent_encode("café") == "caf%C3%A9"
+            @test gRPCServer.percent_encode("日本語") == "%E6%97%A5%E6%9C%AC%E8%AA%9E"
+            @test gRPCServer.percent_encode("→") == "%E2%86%92"
+            @test gRPCServer.percent_encode("emoji 🚀") == "emoji %F0%9F%9A%80"
         end
 
         @testset "Response trailers include grpc-message" begin

@@ -32,6 +32,14 @@ When reporting, please include:
 - **Resolution**: We aim to resolve critical issues within 30 days
 - **Credit**: With your permission, we will credit you in the security advisory
 
+## Before You Deploy
+
+The [Security Hardening](https://csvance.github.io/gRPCServer.jl/dev/security/)
+page states what this server defends against, what it deliberately does not, and
+which guarantees depend on the HTTP/2 backend you select. Its "What this server
+does not do" section and its backend matrix are the two parts most likely to
+change how you deploy.
+
 ## Security Considerations
 
 ### Areas of Potential Concern
@@ -140,7 +148,19 @@ Security vulnerabilities in these dependencies may affect gRPCServer.jl. We moni
 
 ## Audit Status
 
-This project has not yet undergone a formal security audit. See [ROADMAP.md](ROADMAP.md) for plans regarding security review.
+This project has **not** undergone a formal external security audit.
+
+It has undergone an internal review covering the receive path (TLS termination,
+HTTP/2 framing, HPACK, gRPC framing, decompression, dispatch) and the response
+path. The protections that review established are documented on the
+[Security Hardening](https://csvance.github.io/gRPCServer.jl/dev/security/) page
+and covered by regression tests in `test/security/`. See [ROADMAP.md](ROADMAP.md)
+for remaining plans, including applying to external audit programmes.
+
+Read that page before deploying: several protections commonly expected of a gRPC
+server — authentication, authorization, rate limiting, handler timeout
+enforcement — are explicitly the integrator's responsibility here, and some
+guarantees differ by HTTP/2 backend.
 
 ## Acknowledgments
 

@@ -362,10 +362,18 @@ using .ConformanceData
             )
             write(stream.data_buffer, msg)
 
-            # Should warn but still return data
-            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
-            @test result !== nothing
-            @test result == data  # Returns as-is since no encoding specified
+            # A compressed frame with no negotiated encoding is a protocol
+            # violation, not something to pass through: returning the still-
+            # compressed bytes would hand the handler garbage to decode as if it
+            # were the request. Matches src/framing.jl (the HTTPjl path).
+            err = try
+                P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
+                nothing
+            catch e
+                e
+            end
+            @test err isa gRPCServer.GRPCError
+            @test err.code == gRPCServer.StatusCode.UNIMPLEMENTED
         end
 
         @testset "Unknown encoding codec" begin
@@ -385,10 +393,16 @@ using .ConformanceData
             )
             write(stream.data_buffer, msg)
 
-            # Unknown codec should return data unchanged
-            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
-            @test result !== nothing
-            @test result == data
+            # An unsupported grpc-encoding is refused rather than passed through,
+            # for the same reason as the missing-header case above.
+            err = try
+                P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
+                nothing
+            catch e
+                e
+            end
+            @test err isa gRPCServer.GRPCError
+            @test err.code == gRPCServer.StatusCode.UNIMPLEMENTED
         end
 
         @testset "Uncompressed message (flag = 0)" begin
@@ -412,6 +426,79 @@ using .ConformanceData
             result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
             @test result !== nothing
             @test result == data
+        end
+
+        # --- Receive-cap enforcement (security regression tests) -------------
+        #
+        # These cover the two ways a peer can force unbounded memory on this
+        # backend. Both were unenforced: read_grpc_message! had no cap, and it
+        # decompressed through the uncapped `decompress` rather than the
+        # output-capped `_decompress_frame`.
+
+        @testset "Over-cap length prefix is refused" begin
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
+            stream.request_headers = [
+                (":method", "POST"), (":path", "/test/Method"),
+                ("content-type", "application/grpc"),
+            ]
+            # Declare far more than the cap; send no payload. The frame must be
+            # refused on the prefix alone, without waiting for the bytes.
+            write(stream.data_buffer,
+                  vcat(UInt8[0x00], reinterpret(UInt8, [hton(UInt32(10_000_000))])))
+            cap = 1024
+
+            # Reported "ready" so the stream is dispatched and refused rather
+            # than buffering while it waits for a payload it will never accept.
+            @test P2Ext.has_complete_grpc_message(stream, cap)
+
+            err = try
+                P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream, cap)
+                nothing
+            catch e
+                e
+            end
+            @test err isa gRPCServer.GRPCError
+            @test err.code == gRPCServer.StatusCode.RESOURCE_EXHAUSTED
+        end
+
+        @testset "Decompression bomb is refused" begin
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
+            stream.request_headers = [
+                (":method", "POST"), (":path", "/test/Method"),
+                ("content-type", "application/grpc"),
+                ("grpc-encoding", "gzip"),
+            ]
+            # ~1000:1 under gzip: a payload that clears the length-prefix check
+            # but expands far past the cap once decompressed.
+            bomb = gRPCServer.compress(zeros(UInt8, 16 * 1024 * 1024), CompressionCodec.GZIP)
+            cap = 1024 * 1024
+            @test length(bomb) < cap  # passes the prefix check
+            write(stream.data_buffer,
+                  vcat(UInt8[0x01], reinterpret(UInt8, [hton(UInt32(length(bomb)))]), bomb))
+
+            err = try
+                P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream, cap)
+                nothing
+            catch e
+                e
+            end
+            @test err isa gRPCServer.GRPCError
+            @test err.code == gRPCServer.StatusCode.RESOURCE_EXHAUSTED
+        end
+
+        @testset "Honest compressed message under the cap still round-trips" begin
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
+            stream.request_headers = [
+                (":method", "POST"), (":path", "/test/Method"),
+                ("content-type", "application/grpc"),
+                ("grpc-encoding", "gzip"),
+            ]
+            original = Vector{UInt8}("a real request payload")
+            comp = gRPCServer.compress(original, CompressionCodec.GZIP)
+            write(stream.data_buffer,
+                  vcat(UInt8[0x01], reinterpret(UInt8, [hton(UInt32(length(comp)))]), comp))
+            @test P2Ext.read_grpc_message!(
+                PureHTTP2.HTTP2Connection(), stream, 1024 * 1024) == original
         end
 
     end  # T026b

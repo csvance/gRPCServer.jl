@@ -18,6 +18,7 @@ makedocs(
         "Quick Start" => "quickstart.md",
         "Code Generation" => "code_generation.md",
         "TLS" => "tls.md",
+        "Security Hardening" => "security.md",
         "HTTP/2 Backends" => "http2-backends.md",
         "Performance" => "performance.md",
         "API Reference" => "api.md",

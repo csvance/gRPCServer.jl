@@ -269,14 +269,25 @@ Consider making internal development artifacts publicly available for transparen
 
 ### Security Audit
 
-**Status**: Under Consideration
+**Status**: Internal review done; external audit still open
 
-A security audit would help identify vulnerabilities in the HTTP/2 and TLS implementations.
+An internal review of the receive and response paths has been completed. It
+found and fixed enforcement gaps on the opt-in `PureHTTP2Backend` (an
+unenforced receive cap and an uncapped decompressor — a compression bomb), a
+response-metadata gap that let a handler append a second `grpc-status`, and
+several latent error-path defects. The protections are documented on the
+Security Hardening docs page and pinned by `test/security/`.
 
-**Options**:
+An external audit would still add value, particularly on the HTTP/2 and TLS
+layers, which are largely delegated to dependencies.
+
 - [ ] Apply for free security audit programs (e.g., OSTIF, Linux Foundation)
 - [ ] Community security review
-- [ ] Document threat model and security considerations
+- [ ] Fuzzing harnesses for `FrameReader`, HPACK, and decompression
+- [ ] A body-size limit in Nghttp2Wrapper, so the receive cap can bound allocation and not just processing on `Nghttp2Backend`
+- [ ] Expose the verified mTLS peer identity to handlers (blocked on Reseau)
+- [x] Document threat model and security considerations (docs/src/security.md)
+- [x] Adversarial test suite (`test/security/`)
 - [x] Add security policy (SECURITY.md)
 
 **Areas of concern**:

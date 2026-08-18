@@ -95,8 +95,6 @@ end
             @test_throws UnsupportedFeatureError GRPCServer(
                 "127.0.0.1", 50148; http2_backend=PureHTTP2Backend(), h2_connection_window_size=1024 * 1024)
             @test_throws UnsupportedFeatureError GRPCServer(
-                "127.0.0.1", 50149; http2_backend=PureHTTP2Backend(), max_receive_message_length=8 * 1024 * 1024)
-            @test_throws UnsupportedFeatureError GRPCServer(
                 "127.0.0.1", 50150; http2_backend=PureHTTP2Backend(), keepalive_interval=10.0)
         end
         @testset "does not raise for supported" begin
@@ -109,6 +107,12 @@ end
             ) isa GRPCServer
             @test GRPCServer(
                 "127.0.0.1", 50163; http2_backend=PureHTTP2Backend(), max_send_message_length=1024 * 1024) isa GRPCServer
+            # The receive cap IS enforced on this backend (read_grpc_message!
+            # refuses an over-cap length prefix and decompresses through the
+            # output-capped _decompress_frame), so the keyword is honored rather
+            # than rejected.
+            @test GRPCServer(
+                "127.0.0.1", 50164; http2_backend=PureHTTP2Backend(), max_receive_message_length=8 * 1024 * 1024) isa GRPCServer
             @test GRPCServer(
                 "127.0.0.1", 50164; http2_backend=PureHTTP2Backend(), max_message_size=8 * 1024 * 1024) isa GRPCServer
         end
@@ -126,7 +130,12 @@ end
         @test c.bidi_streaming == false
         @test c.reflection == false
         @test c.health == true
-        @test c.receive_cap == false
+        # The receive cap and receive-side decompression are enforced by the
+        # extension's read_message!. Note the cap bounds what this backend
+        # *processes*, not what it allocates — Nghttp2Wrapper buffers the whole
+        # request body before the cap is consulted (see docs/src/security.md).
+        @test c.receive_cap == true
+        @test c.decompression == true
         @test c.send_compression == false
 
         # Validator raises for configs the backend cannot honor (backend passed

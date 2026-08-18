@@ -46,25 +46,73 @@ const PUREHTTP2_TESTS = get(ENV, "GRPCSERVER_TEST_PUREHTTP2", "false") in ("true
     include("unit/test_tls.jl")
     include("unit/test_tls_docs.jl")
     include("unit/test_reflection.jl")
-    PUREHTTP2_TESTS && include("unit/test_hpack.jl")
-    PUREHTTP2_TESTS && include("unit/test_http2_stream.jl")
-    PUREHTTP2_TESTS && include("unit/test_stream_state_validation.jl")
-    PUREHTTP2_TESTS && include("unit/test_content_type.jl")
-    PUREHTTP2_TESTS && include("unit/test_grpc_protocol.jl")
-    PUREHTTP2_TESTS && include("unit/test_http2_conformance.jl")
-    PUREHTTP2_TESTS && include("unit/test_request_validation.jl")
     include("unit/test_response_format.jl")
-    PUREHTTP2_TESTS && include("unit/test_message_encoding.jl")
-    PUREHTTP2_TESTS && include("unit/test_custom_metadata.jl")
     include("unit/test_error_mapping.jl")
     include("unit/test_dispatch_grpc_error_mapping.jl")
     include("unit/test_strict.jl")
-    PUREHTTP2_TESTS && include("unit/test_connection_management.jl")
     include("unit/test_timeout_handling.jl")
-    PUREHTTP2_TESTS && include("unit/test_http2_backend.jl")
+
+    # PureHTTP2-gated tests, wrapped in their own module.
+    #
+    # These files load PureHTTP2, which exports `get_metadata` and `set_header!`
+    # — names gRPCServer exports too. Included straight into Main they made both
+    # names ambiguous THERE, so unrelated tests that call them unqualified
+    # (test_context.jl, test_metadata.jl, test_dispatch_grpc_error_mapping.jl)
+    # failed with `UndefVarError` whenever the opt-in flag was set. The flag
+    # therefore produced a wall of failures instead of coverage.
+    #
+    # A module confines the collision: PureHTTP2's exports are visible here and
+    # nowhere else. Mirrors the CsvanceSuite pattern below. Each included file
+    # already guards its own helper includes with `isdefined`, so they are
+    # self-contained in this scope.
+    if PUREHTTP2_TESTS
+        @eval module PureHTTP2Suite
+        using Test
+        using gRPCServer
+        using PureHTTP2          # loads gRPCServerPureHTTP2Ext
+        using JSON
+        using Sockets
+
+        # Reuse the TestUtils instance Main already included, rather than
+        # including it again here — a second copy would define a parallel set of
+        # mock types that are not `===` to Main's.
+        using ..TestUtils
+
+        # The moved names (read_grpc_message!, get_response_content_type) are
+        # reached through the extension module.
+        const P2Ext = Base.get_extension(gRPCServer, :gRPCServerPureHTTP2Ext)
+        P2Ext === nothing && error(
+            "GRPCSERVER_TEST_PUREHTTP2 is set but gRPCServerPureHTTP2Ext did not load")
+
+        include("unit/test_hpack.jl")
+        include("unit/test_http2_stream.jl")
+        include("unit/test_stream_state_validation.jl")
+        include("unit/test_content_type.jl")
+        include("unit/test_grpc_protocol.jl")
+        include("unit/test_http2_conformance.jl")
+        include("unit/test_request_validation.jl")
+        include("unit/test_message_encoding.jl")
+        include("unit/test_custom_metadata.jl")
+        include("unit/test_connection_management.jl")
+        include("unit/test_http2_backend.jl")
+        include("backends/test_backend_interface.jl")
+        include("interop/test_hpack_interop.jl")
+        end
+    end
+
+    # Security tests: adversarial inputs from a hostile peer, and the response
+    # metadata a handler is allowed to put on the wire (see SEC_ROADMAP).
+    include("security/test_framing_adversarial.jl")
+    include("security/test_response_metadata.jl")
+    include("security/test_tls_adversarial.jl")
+    include("security/test_resource_exhaustion.jl")
+    include("security/test_error_paths.jl")
+
+    # Fuzzing of the peer-controlled receive path. Runs a modest, deterministic
+    # number of iterations here; raise GRPCSERVER_FUZZ_ITERATIONS for a campaign.
+    include("fuzz/fuzz_receive_path.jl")
 
     # HTTP/2 backend tests (feature 020)
-    PUREHTTP2_TESTS && include("backends/test_backend_interface.jl")
     include("backends/test_httpjl_backend.jl")
     include("backends/test_capability_validation.jl")
 
@@ -110,9 +158,6 @@ const PUREHTTP2_TESTS = get(ENV, "GRPCSERVER_TEST_PUREHTTP2", "false") in ("true
 
     # Contract tests
     include("contract/test_grpcurl.jl")
-
-    # Interoperability tests
-    PUREHTTP2_TESTS && include("interop/test_hpack_interop.jl")
 
     # Basic module tests
     @testset "Module loads correctly" begin

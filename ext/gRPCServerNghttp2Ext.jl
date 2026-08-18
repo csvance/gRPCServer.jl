@@ -36,10 +36,16 @@ mutable struct Nghttp2GRPCStream <: gRPCServer.AbstractGRPCStream
     headers::Vector{Nghttp2Wrapper.NVPair}
     body::Vector{UInt8}
     trailers::Vector{Nghttp2Wrapper.NVPair}
+    # Receive-side size cap, seeded from ServerConfig.max_receive_message_length
+    # at dispatch. See the note on read_message! for what it does and does not
+    # bound on this backend.
+    max_receive_message_length::Int64
 end
 
-Nghttp2GRPCStream(req) = Nghttp2GRPCStream(req, 0, 200, Nghttp2Wrapper.NVPair[],
-                                           UInt8[], Nghttp2Wrapper.NVPair[])
+Nghttp2GRPCStream(req, max_receive_message_length::Integer = 4 * 1024 * 1024) =
+    Nghttp2GRPCStream(req, 0, 200, Nghttp2Wrapper.NVPair[],
+                      UInt8[], Nghttp2Wrapper.NVPair[],
+                      Int64(max_receive_message_length))
 
 # --- request side ---
 
@@ -52,18 +58,79 @@ request_metadata(s::Nghttp2GRPCStream) =
 # never be observed mid-cancellation here.
 is_cancelled(::Nghttp2GRPCStream) = false
 
+"""
+    read_message!(s::Nghttp2GRPCStream)
+
+Walk the next length-prefixed message out of the fully-buffered request body.
+
+!!! warning "What the receive cap bounds on this backend"
+    `max_receive_message_length` is enforced here, so a handler never sees a
+    message larger than the configured cap and an oversize one is refused with
+    `RESOURCE_EXHAUSTED`, as on the other backends. But Nghttp2Wrapper's handler
+    is **buffered**: the whole request body is already in memory before this
+    function is ever called. The cap therefore bounds what the server *processes*,
+    not what it *allocates* — unlike `HTTPjlBackend` and `PureHTTP2Backend`,
+    where the prefix is refused before the payload is read off the socket.
+
+    Bounding the allocation itself needs a body-size limit in Nghttp2Wrapper,
+    which it does not currently offer. This is the reason `Nghttp2Backend` is not
+    recommended for untrusted peers.
+"""
 function read_message!(s::Nghttp2GRPCStream)
     body = s.req.body
     # 5-byte gRPC prefix: 1 compression flag + 4 big-endian length.
     s.offset + 5 > length(body) && return nothing
+    compressed = body[s.offset + 1] != 0x00
     len = (UInt32(body[s.offset + 2]) << 24) | (UInt32(body[s.offset + 3]) << 16) |
           (UInt32(body[s.offset + 4]) << 8) | UInt32(body[s.offset + 5])
+
+    # Refuse an over-cap message with the same status the other backends use, so
+    # a client sees consistent behaviour whichever backend serves it.
+    if len > s.max_receive_message_length
+        throw(gRPCServer.GRPCError(
+            gRPCServer.StatusCode.RESOURCE_EXHAUSTED,
+            "length-prefix longer than max_receive_message_length: $(len) > $(s.max_receive_message_length)",
+        ))
+    end
+
     stop = s.offset + 5 + Int(len)
     stop > length(body) && return nothing          # truncated
-    # Borrowed view into the fully-buffered request body — no copy.
-    msg = IOBuffer(@view body[(s.offset + 6):stop])
+    payload = @view body[(s.offset + 6):stop]
     s.offset = stop
-    return msg
+
+    # Honour the compression flag. It used to be read and then ignored, so a
+    # compressed frame handed the handler the still-compressed bytes, which the
+    # protobuf decoder then parsed as if they were the request — a silently wrong
+    # result rather than an error. Decompression goes through gRPCServer's
+    # output-capped decoder, so a compression bomb cannot force an unbounded
+    # allocation here either.
+    if compressed
+        encoding = _grpc_encoding(s)
+        codec = encoding === nothing ? nothing : gRPCServer.parse_codec(encoding)
+        if codec === nothing
+            throw(gRPCServer.GRPCError(
+                gRPCServer.StatusCode.UNIMPLEMENTED,
+                encoding === nothing ?
+                    "Request was compressed but no grpc-encoding header was provided." :
+                    "Request was compressed with an unsupported grpc-encoding.",
+            ))
+        elseif codec != gRPCServer.CompressionCodec.IDENTITY
+            decompressed = gRPCServer._decompress_frame(
+                payload, codec, s.max_receive_message_length)
+            return IOBuffer(decompressed)
+        end
+    end
+
+    # Borrowed view into the fully-buffered request body — no copy.
+    return IOBuffer(payload)
+end
+
+# The request's `grpc-encoding` header, or `nothing` when the client sent none.
+function _grpc_encoding(s::Nghttp2GRPCStream)::Union{Nothing, String}
+    for nv in s.req.headers
+        lowercase(String(copy(nv.name))) == "grpc-encoding" && return String(copy(nv.value))
+    end
+    return nothing
 end
 
 # --- response side ---
@@ -130,7 +197,7 @@ function serve_grpc(::gRPCServer.Nghttp2Backend, server, on_call)
             end
         end
 
-        gs = Nghttp2GRPCStream(req)
+        gs = Nghttp2GRPCStream(req, server.config.max_receive_message_length)
         on_call(gs, gRPCServer.PeerInfo(IPv4(0), 0))
         return Nghttp2Wrapper.ServerResponse(gs.status; headers = gs.headers,
                                              body = gs.body, trailers = gs.trailers)

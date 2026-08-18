@@ -82,6 +82,74 @@ end
 
 # --- Construction ---
 
+# Reseau parses key material lazily — `_tls_local_identity` loads and decodes the
+# PEM on first use, i.e. during the first handshake, not when the `Config` is
+# built. Left alone, that means a server configured with a corrupt certificate
+# starts up reporting success and then fails every handshake, client by client:
+# the failure surfaces in production instead of at startup. It also breaks
+# `reload!`'s documented invariant, since a certificate rotation can install
+# unusable material and report success.
+#
+# So the shape of the PEM is checked here, at config-build time. This is
+# deliberately a *structural* check, not a cryptographic one: it does not verify
+# that the key matches the certificate, that the chain is well-ordered, or that
+# nothing has expired — Reseau still decides all of that at handshake time. What
+# it does catch is the common operational mistake: a truncated, empty, or wrong
+# file, or a path pointing at something that is not PEM at all.
+#
+# Reseau exposes no public API for validating a Config, and every relevant
+# routine is `_`-prefixed internal, so reaching into it would couple this package
+# to upstream internals. A structural check is the honest trade.
+
+# PEM files are configuration, not network input, but bound the read anyway so a
+# mistyped path pointing at a huge file cannot pull it all into memory.
+const _MAX_PEM_BYTES = 4 * 1024 * 1024
+
+function _pem_labels(path::AbstractString)::Vector{String}
+    size = try
+        filesize(path)
+    catch
+        0
+    end
+    if size > _MAX_PEM_BYTES
+        throw(TLSHandshakeError(TLSHandshakeFailureKind.CONFIG_ERROR,
+            "TLS file is implausibly large for PEM ($(size) bytes): $(path)"))
+    end
+    text = try
+        read(path, String)
+    catch e
+        throw(TLSHandshakeError(TLSHandshakeFailureKind.CONFIG_ERROR,
+            "Cannot read TLS file $(path): $(sprint(showerror, e))"; cause = e))
+    end
+    labels = String[]
+    for m in eachmatch(r"-----BEGIN ([A-Z0-9 ]+)-----", text)
+        label = m.captures[1]
+        # Only count a block that is actually closed; a truncated file is the
+        # exact case this check exists for.
+        occursin("-----END $(label)-----", text) && push!(labels, label)
+    end
+    return labels
+end
+
+# Never interpolate file *contents* into an error — the private key is one of
+# these files. Only the path and the block labels found are reported.
+function _require_pem!(path::AbstractString, accepted::Vector{String}, what::String)
+    labels = _pem_labels(path)
+    if isempty(labels)
+        throw(TLSHandshakeError(TLSHandshakeFailureKind.CONFIG_ERROR,
+            "$(what) is not valid PEM (no complete -----BEGIN/END----- block): $(path)"))
+    end
+    if !any(l -> l in accepted, labels)
+        throw(TLSHandshakeError(TLSHandshakeFailureKind.CONFIG_ERROR,
+            "$(what) contains no $(join(accepted, " or ")) block (found: $(join(labels, ", "))): $(path)"))
+    end
+    return nothing
+end
+
+const _PEM_CERT_LABELS = ["CERTIFICATE"]
+const _PEM_KEY_LABELS = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY",
+                         "ENCRYPTED PRIVATE KEY"]
+
 function _to_reseau_config(config::TLSConfig)::Reseau.TLS.Config
     # Pre-flight file existence checks so CONFIG_ERROR surfaces before any
     # Reseau internals are touched. Reseau itself only validates files at
@@ -98,6 +166,12 @@ function _to_reseau_config(config::TLSConfig)::Reseau.TLS.Config
         throw(TLSHandshakeError(TLSHandshakeFailureKind.CONFIG_ERROR,
             "Client CA file not found: $(config.client_ca)"))
     end
+
+    # Structural PEM check — see the note above.
+    _require_pem!(config.cert_chain, _PEM_CERT_LABELS, "Certificate chain")
+    _require_pem!(config.private_key, _PEM_KEY_LABELS, "Private key")
+    config.client_ca === nothing ||
+        _require_pem!(config.client_ca, _PEM_CERT_LABELS, "Client CA")
     client_auth = config.require_client_cert ?
         Reseau.TLS.ClientAuthMode.RequireAndVerifyClientCert :
         Reseau.TLS.ClientAuthMode.NoClientCert
@@ -116,7 +190,7 @@ function _to_reseau_config(config::TLSConfig)::Reseau.TLS.Config
         )
     catch e
         throw(TLSHandshakeError(
-            CONFIG_ERROR,
+            TLSHandshakeFailureKind.CONFIG_ERROR,
             "Failed to build TLS config from cert=$(config.cert_chain) key=$(config.private_key): $(sprint(showerror, e))";
             cause = e,
         ))
@@ -130,7 +204,7 @@ function TLSTransport(grpc_config::TLSConfig, host::AbstractString, port::Intege
                           backlog = 128, reuseaddr = true)
     catch e
         throw(TLSHandshakeError(
-            CONFIG_ERROR,
+            TLSHandshakeFailureKind.CONFIG_ERROR,
             "Failed to bind TLS listener on $(host):$(port): $(sprint(showerror, e))";
             cause = e,
         ))

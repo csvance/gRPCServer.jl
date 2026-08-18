@@ -154,9 +154,11 @@ backend_capabilities(::Type{PureHTTP2Backend}) = BackendCapabilities(
     # h2_initial_window_size / h2_connection_window_size are never passed to
     # the connection (ext/gRPCServerPureHTTP2Ext.jl).
     http2_settings=false,
-    # max_receive_message_length is not enforced: the PureHTTP2 extension's
-    # read_grpc_message! has no cap (ext/gRPCServerPureHTTP2Ext.jl).
-    receive_cap=false,
+    # max_receive_message_length IS enforced: the extension's
+    # read_grpc_message! refuses an over-cap length prefix before copying the
+    # payload, and decompresses through gRPCServer._decompress_frame (the same
+    # output-capped decompressor the HTTPjl path uses).
+    receive_cap=true,
     # Send-side compression is inert (never read outside config plumbing).
     send_compression=false,
 )
@@ -192,10 +194,17 @@ backend_capabilities(::Type{Nghttp2Backend}) = BackendCapabilities(
     # drain_timeout config ignored; only stop!(; timeout=) honored
     # (ext:145-171).
     drain_timeout_config=false,
-    # max_receive_message_length not enforced (ext:60-73 read_message! has no cap).
-    receive_cap=false,
-    # receive-side decompression not performed (raw bytes returned, ext:60-73).
-    decompression=false,
+    # max_receive_message_length IS enforced: read_message! refuses an over-cap
+    # length prefix with RESOURCE_EXHAUSTED. Note the difference in KIND from the
+    # other two backends, spelled out in the read_message! docstring and the
+    # HTTP/2 Backends page: Nghttp2Wrapper's handler is buffered, so the whole
+    # request body is already in memory before the cap is consulted. It bounds
+    # what the server processes, not what it allocates.
+    receive_cap=true,
+    # Receive-side decompression IS performed, through the same output-capped
+    # decoder the other backends use. It previously read the compressed flag and
+    # ignored it, handing the handler still-compressed bytes.
+    decompression=true,
     # send-side compression inert.
     send_compression=false,
     # server-streaming RPCs refused UNIMPLEMENTED (ext:101-113).

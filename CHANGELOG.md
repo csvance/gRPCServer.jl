@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The receive-side message cap is now enforced on `PureHTTP2Backend` and
+  `Nghttp2Backend`.** It was reported but not applied. The capability gate
+  protected the explicit `max_receive_message_length` keyword, but
+  `max_message_size` — the documented knob, and the one SECURITY.md tells
+  operators to set — seeds it without being gated. A server built with
+  `max_message_size = 1024` on either backend reported that cap back through
+  `ServerConfig` and its own `show` while nothing enforced it, and the defaults
+  were unbounded. An operator checking their configuration got a false
+  confirmation, which is worse than having no limit at all. Both backends now
+  refuse an over-cap length prefix with `RESOURCE_EXHAUSTED`.
+
+  Note the asymmetry, which is documented rather than smoothed over: on
+  `HTTPjlBackend` and `PureHTTP2Backend` the prefix is refused *before the
+  payload is read*, so the cap bounds what the server allocates.
+  Nghttp2Wrapper's handler is buffered, so the whole request body is in memory
+  before the cap is consulted — there it bounds what the server *processes*.
+  `Nghttp2Backend` therefore remains unsuitable for untrusted peers.
+
+- **Decompression is now bounded on both optional backends.**
+  `PureHTTP2Backend` decompressed through the uncapped `decompress` rather than
+  the output-capped decoder used by the default backend: a 63.7 KiB gzip payload
+  expanded to 64 MiB in 0.17 s (~1000:1), where `HTTPjlBackend` refused the same
+  input. `Nghttp2Backend` performed no decompression at all. Both now use the
+  shared output-capped decoder.
+
+- **A handler can no longer spoof `grpc-status`.** Handler-supplied response
+  headers and trailers were emitted with no validation. Because the runtime
+  pushes its own `grpc-status` first and handler trailers are appended, a
+  handler could add a second one — and a client reading the last occurrence
+  would see it, turning a `PERMISSION_DENIED` into an `OK`. Pseudo-headers such
+  as `:path` were also emitted (forbidden in an HTTP/2 response), and CR, LF and
+  NUL passed through values (response splitting across an HTTP/2 -> HTTP/1.1
+  downgrade). Reserved names, pseudo-headers, names outside the gRPC metadata
+  charset, and values with forbidden bytes are now dropped with a warning.
+
+- **Invalid TLS key material is refused at startup.** Reseau parses PEM lazily,
+  at the first handshake, so a server with a corrupt certificate started up
+  reporting success and then failed every handshake in production. This also
+  broke `reload!`'s documented invariant: a certificate rotation could install
+  unusable material and report success. A structural PEM check now runs when the
+  config is built. It is not cryptographic — key/certificate correspondence and
+  expiry are still decided at handshake time.
+
+### Fixed
+
+- **`TLSHandshakeError(CONFIG_ERROR, …)` raised `UndefVarError`.** The variant
+  was referenced unqualified from two `catch` blocks, so when they fired the
+  intended diagnostic was replaced by an undefined-variable error, and `serve!`
+  re-wrapped it as a `BindError` — the wrong class, and a message further still
+  from the cause.
+
+- **A compressed frame with no usable codec is refused instead of passed
+  through.** On both optional backends such a frame only produced a warning, and
+  the still-compressed bytes were handed to the handler for the protobuf decoder
+  to parse as if they were the request — a silently wrong result rather than an
+  error. Now `UNIMPLEMENTED`, matching the default backend and the gRPC spec.
+  On `Nghttp2Backend` the compression flag was read and then ignored entirely.
+
+- **`_decompress_frame` returned an empty message for very large caps.** It
+  reads `maxlen + 1` bytes to detect an over-cap payload; near the top of the
+  Int64 range that sum overflowed to a negative read count and the function
+  silently returned no data instead of the decompressed message.
+
+### Changed
+
+- **Use `import PureHTTP2`, not `using PureHTTP2`, when selecting that
+  backend.** Both load the extension, but gRPCServer and PureHTTP2 export two
+  names in common — `get_metadata` and `set_header!` — so `using` both makes
+  each ambiguous. `get_metadata(ctx, "authorization")` is the documented
+  authentication pattern, so following the backend's own install instruction
+  broke the security guide's auth example with `UndefVarError`. The error
+  message, docstrings and docs now say `import` and explain why.
+
+- `max_receive_message_length` no longer raises `UnsupportedFeatureError` on
+  `PureHTTP2Backend` or `Nghttp2Backend`: it is honoured on both.
+
+### Added
+
+- **A Security Hardening page** in the documentation: what the server defends
+  against, what it deliberately does not (no authentication, authorization, rate
+  limiting, or mid-execution deadline enforcement), which guarantees differ by
+  HTTP/2 backend, a production baseline, and how to size the limits against host
+  memory. It also records that mTLS authenticates but cannot authorize, since the
+  verified peer identity is not exposed to handlers.
+- **`test/security/`** — adversarial suites covering framing, decompression
+  bombs, response-metadata injection, TLS configuration, admission-slot
+  accounting, and coverage-driven error paths.
+- **`test/fuzz/`** — an invariant-based fuzzing harness for the peer-controlled
+  receive path, configurable via `GRPCSERVER_FUZZ_ITERATIONS`. Beyond "nothing
+  crashes", it asserts that receive-buffer allocation follows the bytes
+  *received*, not the size the peer *declared*.
+- `permissions: contents: read` on the CI test workflow, which previously
+  inherited the repository default.
+
+### Removed
+
+- **`HTTP_urlencode`**, a second `grpc-message` encoder that was never called
+  and was wrong: it iterated over `Char` and applied `UInt8(c)`, emitting the
+  truncated code point instead of UTF-8 bytes (`"café"` -> `"caf%E9"`) and
+  throwing `InexactError` above U+00FF. `percent_encode` is the single
+  implementation.
+
 ## [1.0.0] - 2026-08-17
 
 ### Changed

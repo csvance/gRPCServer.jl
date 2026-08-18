@@ -53,9 +53,15 @@ Create a gRPC server on the pure-Julia HTTP/2 backend
 ([`PureHTTP2Backend`](@ref)).
 
 PureHTTP2 is an **optional dependency**: load it before constructing the server
-(via `using PureHTTP2`, which also loads the `gRPCServerPureHTTP2Ext`
+(via `import PureHTTP2`, which also loads the `gRPCServerPureHTTP2Ext`
 extension), or constructing this entry point throws an actionable
 `ArgumentError`.
+
+Use `import PureHTTP2`, not `using PureHTTP2`. Both load the extension, but
+PureHTTP2 also exports `get_metadata` and `set_header!`, which gRPCServer
+exports too — `using` both makes each name ambiguous and unusable unqualified.
+`get_metadata(ctx, "authorization")` is the documented authentication pattern
+(see SECURITY.md), so the collision lands squarely on the auth path.
 
 Accepts the same configuration keywords as [`GRPCServer`](@ref); the backend is
 fixed to `PureHTTP2Backend`. Explicitly setting a keyword this backend cannot
@@ -65,12 +71,15 @@ the following keywords raise (explicitly set): `max_connections`,
 `keepalive_timeout`, `idle_timeout`, `read_header_timeout`, `read_timeout`,
 `write_timeout`, `max_header_bytes`, `reuseaddr`, `backlog`,
 `h2_initial_window_size`, `h2_connection_window_size`,
-`max_receive_message_length`, `compression_enabled=true`,
-`compression_threshold`, `supported_codecs`. `drain_timeout` is supported.
+`compression_enabled=true`, `compression_threshold`, `supported_codecs`.
+`drain_timeout` and `max_receive_message_length` are supported — the receive cap
+is enforced on the read path (an over-cap length prefix is refused before the
+payload is copied, and compressed frames are decompressed through the
+output-capped decoder).
 
 # Example
 ```julia
-using PureHTTP2
+import PureHTTP2
 server = GRPCServerPureHTTP2("0.0.0.0", 50051; drain_timeout=60.0)
 ```
 """
